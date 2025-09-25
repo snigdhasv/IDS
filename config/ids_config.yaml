@@ -1,0 +1,45 @@
+# IDS System Configuration
+# This file contains configuration for DPDK, Pktgen, Suricata, and Kafka
+
+dpdk:
+  rte_sdk: "/opt/ids/downloads/dpdk-24.07"
+  rte_target: "build"
+  hugepage_size: 2048  # MB
+  hugepage_count: 1024
+  driver: "uio_pci_generic"
+
+pktgen:
+  cores: "0x3"  # CPU cores to use (binary: cores 0 and 1)
+  memory_channels: 4
+  ports_mapping: "[1:2].0"  # Core 1 handles RX/TX for port 0
+  packet_size: 64
+  packet_rate: 10  # Percentage of line rate
+  src_mac: "00:11:22:33:44:55"
+  dst_mac: "00:11:22:33:44:66"
+  src_ip: "192.168.1.1"
+  dst_ip: "192.168.1.2"
+  src_port: 1234
+  dst_port: 5678
+
+suricata:
+  interface: "dpdk0"
+  rules_directory: "/etc/suricata/rules"
+  eve_log_path: "/var/log/suricata/eve.json"
+  stats_interval: 8
+  capture_mode: "dpdk"
+
+kafka:
+  bootstrap_servers: "localhost:9092"
+  topic_prefix: "ids"
+  batch_size: 16384
+  linger_ms: 5
+  compression_type: "gzip"
+
+# System paths
+install_dir: "/opt/ids"
+log_dir: "/opt/ids/logs"
+config_dir: "/opt/ids/config"
+
+# Performance settings
+worker_threads: 4
+buffer_size: 65536

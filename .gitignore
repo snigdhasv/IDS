@@ -1,0 +1,190 @@
+# IDS Project .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Logs
+*.log
+logs/
+/opt/ids/logs/
+
+# DPDK build artifacts
+*.o
+*.a
+*.so
+*.so.*
+.deps/
+.dirstamp
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+temp/
+
+# Test reports and output
+test_report_*.txt
+dpdk_pktgen_test_report_*.txt
+pktgen_*_config*.lua
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Network capture files
+*.pcap
+*.pcapng
+
+# Configuration files with sensitive data
+**/config/*secret*
+**/config/*private*
+**/config/*key*
+
+# Compiled DPDK applications
+/opt/ids/downloads/
+dpdk_test
+dpdk_test.c
+
+# Large binary files
+*.tar.gz
+*.tar.xz
+*.zip
+*.deb
+*.rpm
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Lock files
+*.lock
+.lock
+
+# Cache directories
+.cache/
+cache/
+
+# Documentation build
+docs/_build/
+docs/build/
+
+# Coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff (if used later)
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff (if used later)
+instance/
+.webassets-cache
+
+# Celery stuff (if used later)
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# Project specific
+# Exclude large DPDK installation directories but keep the structure
+/opt/
+!/opt/ids/
+/opt/ids/downloads/dpdk-*/
+/opt/ids/downloads/pktgen-*/
+/opt/ids/downloads/*.tar.*
+
+# Keep configuration templates but ignore actual config with sensitive data
+!/config/
+config/*local*
+config/*production*
