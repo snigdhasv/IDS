@@ -1,4 +1,5 @@
 from scapy.all import Ether, IP, TCP, UDP, ICMP, Raw, sendp, RandIP, RandMAC, Packet
+from scapy.layers.dns import DNS, DNSQR
 import random
 import time
 
