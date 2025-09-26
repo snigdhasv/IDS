@@ -190,34 +190,42 @@ Once pktgen is running, you can use these commands:
 
 ## Troubleshooting
 
-### Common Issues
+### Common Issues and Solutions
 
-1. **"No hugepages available"**
-   ```bash
-   # Check hugepages
-   cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
-   
-   # If 0, run the setup script again
-   sudo ./setup_dpdk_pktgen.sh
-   ```
+#### 1. DPDK EAL Initialization Failure
+**Symptoms**: 
+- Error: `EAL: get_seg_fd(): open '/dev/hugepages/rtemap_0' failed: Permission denied`
+- Simple DPDK App test fails
 
-2. **"Cannot bind interface"**
-   ```bash
-   # Make sure modules are loaded
-   sudo modprobe uio
-   sudo modprobe uio_pci_generic
-   
-   # Check interface status
-   sudo /usr/local/bin/dpdk-devbind.py --status
-   ```
+**Solution**: 
+- Tests automatically use `--in-memory` flag to avoid hugepage permission issues
+- For production deployments, consider running with `sudo` or configuring hugepage permissions
+- Alternative: Use `--no-huge` flag for testing without hugepages
 
-3. **"Permission denied" errors**
-   - Make sure to run pktgen with `sudo`
-   - Ensure hugepages are mounted: `ls /mnt/huge`
+#### 2. Compilation Errors
+**Symptoms**: 
+- `undefined reference to rte_*` functions
+- Missing header file errors
 
-4. **"No ports available"**
-   - Make sure interface is bound to DPDK driver
-   - Check that interface is not in use by kernel
+**Solution**: 
+- Ensure DPDK is properly installed: `pkg-config --exists libdpdk`
+- Check compilation flags: `pkg-config --libs --cflags libdpdk`
+- Tests automatically use proper pkg-config flags
+
+#### 3. Pktgen Issues
+**Symptoms**: 
+- Command not found errors
+- Network interface binding problems
+
+**Solution**: 
+- Verify pktgen installation: `which pktgen`
+- Check network interfaces: `ip link show`
+- For interface binding issues, see DPDK network setup documentation
+
+### Performance Considerations
+- Use `--in-memory` for testing only; production should use hugepages for better performance
+- Monitor system resources during packet generation tests
+- Adjust test parameters based on available system resources
 
 ### Monitoring Network Traffic
 

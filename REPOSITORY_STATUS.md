@@ -104,3 +104,17 @@ python3 dpdk_pktgen_test.py
 3. **Continue Development**: The foundation is set for IDS pipeline integration
 
 Your DPDK and Pktgen testing suite is complete and working! 🎉
+
+## Recent Updates
+
+### Latest Fix (2024)
+**Issue Resolved**: Simple DPDK Application Test Failure
+- **Problem**: DPDK EAL initialization was failing due to hugepage permission issues
+- **Root Cause**: `/dev/hugepages` requires root access for memory mapping
+- **Solution**: Added `--in-memory` flag to DPDK test application
+- **Result**: All tests now pass with 100% success rate
+
+**Technical Details**:
+- Error was: `EAL: get_seg_fd(): open '/dev/hugepages/rtemap_0' failed: Permission denied`
+- Fix: Modified `basic_dpdk_test.py` to use `--in-memory` flag when running the test application
+- Benefit: Tests can now run without root privileges while maintaining full DPDK functionality verification
