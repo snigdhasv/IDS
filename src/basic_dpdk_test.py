@@ -115,6 +115,7 @@ def test_simple_dpdk_app():
 #include <rte_eal.h>
 #include <rte_common.h>
 #include <rte_log.h>
+#include <rte_lcore.h>
 #include <stdio.h>
 
 int main(int argc, char *argv[]) {
@@ -137,13 +138,32 @@ int main(int argc, char *argv[]) {
         with open('/tmp/dpdk_test.c', 'w') as f:
             f.write(test_code)
         
-        # Compile test application
-        compile_cmd = [
-            'gcc', '-o', '/tmp/dpdk_test', '/tmp/dpdk_test.c',
-            '-I/usr/local/include',
-            '-L/usr/local/lib/x86_64-linux-gnu',
-            '-ldpdk', '-lpthread', '-lnuma', '-ldl'
-        ]
+        # Compile test application using pkg-config for proper linking
+        try:
+            # Get DPDK compile and link flags
+            cflags_result = subprocess.run(['pkg-config', '--cflags', 'libdpdk'], 
+                                         capture_output=True, text=True)
+            libs_result = subprocess.run(['pkg-config', '--libs', 'libdpdk'], 
+                                       capture_output=True, text=True)
+            
+            if cflags_result.returncode != 0 or libs_result.returncode != 0:
+                raise Exception("Failed to get DPDK flags from pkg-config")
+            
+            cflags = cflags_result.stdout.strip().split()
+            libs = libs_result.stdout.strip().split()
+            
+            compile_cmd = ['gcc', '-o', '/tmp/dpdk_test', '/tmp/dpdk_test.c'] + cflags + libs
+            
+        except Exception as e:
+            print(f"⚠ pkg-config failed, using fallback flags: {e}")
+            # Fallback to basic flags
+            compile_cmd = [
+                'gcc', '-o', '/tmp/dpdk_test', '/tmp/dpdk_test.c',
+                '-I/usr/local/include',
+                '-L/usr/local/lib/x86_64-linux-gnu',
+                '-lrte_eal', '-lrte_mbuf', '-lrte_mempool', '-lrte_ring',
+                '-lpthread', '-lnuma', '-ldl'
+            ]
         
         result = subprocess.run(compile_cmd, capture_output=True, text=True)
         if result.returncode != 0:
@@ -153,8 +173,8 @@ int main(int argc, char *argv[]) {
         
         print("✓ DPDK test application compiled successfully")
         
-        # Run test application
-        run_cmd = ['/tmp/dpdk_test', '--log-level=*:info']
+        # Run test application with in-memory mode to avoid hugepage permission issues
+        run_cmd = ['/tmp/dpdk_test', '--in-memory', '--log-level=*:info']
         result = subprocess.run(run_cmd, capture_output=True, text=True, timeout=10)
         
         if result.returncode == 0 and "SUCCESS" in result.stdout:
