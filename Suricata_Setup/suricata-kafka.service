@@ -1,0 +1,31 @@
+[Unit]
+Description=Suricata IDS/IPS with DPDK and Kafka Output
+After=network.target kafka.service
+Wants=kafka.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStartPre=/bin/rm -f /var/run/suricata-kafka.pid
+ExecStart=/usr/local/bin/suricata -c /etc/suricata/suricata-kafka.yaml --dpdk -v
+ExecReload=/bin/kill -USR2 $MAINPID
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=10
+PIDFile=/var/run/suricata-kafka.pid
+
+# Environment variables for DPDK
+Environment=RTE_SDK=/usr/share/dpdk
+Environment=RTE_TARGET=x86_64-default-linuxapp-gcc
+
+# Security settings
+NoNewPrivileges=false
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/log /var/run /var/lib/suricata /tmp
+
+[Install]
+WantedBy=multi-user.target

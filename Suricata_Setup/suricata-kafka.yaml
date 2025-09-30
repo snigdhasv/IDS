@@ -1,0 +1,385 @@
+%YAML 1.1
+---
+
+# Suricata configuration for DPDK packet capture with direct Kafka output
+# No file-based logging - all events go directly to Kafka
+
+vars:
+  address-groups:
+    HOME_NET: "[192.168.0.0/16,10.0.0.0/8,172.16.0.0/12]"
+    EXTERNAL_NET: "!$HOME_NET"
+    HTTP_SERVERS: "$HOME_NET"
+    SMTP_SERVERS: "$HOME_NET"
+    SQL_SERVERS: "$HOME_NET"
+    DNS_SERVERS: "$HOME_NET"
+    TELNET_SERVERS: "$HOME_NET"
+    AIM_SERVERS: "$EXTERNAL_NET"
+    DC_SERVERS: "$HOME_NET"
+    DNP3_SERVER: "$HOME_NET"
+    DNP3_CLIENT: "$HOME_NET"
+    MODBUS_CLIENT: "$HOME_NET"
+    MODBUS_SERVER: "$HOME_NET"
+    ENIP_CLIENT: "$HOME_NET"
+    ENIP_SERVER: "$HOME_NET"
+  port-groups:
+    HTTP_PORTS: "80"
+    SHELLCODE_PORTS: "!80"
+    ORACLE_PORTS: 1521
+    SSH_PORTS: 22
+    DNP3_PORTS: 20000
+    MODBUS_PORTS: 502
+    FILE_DATA_PORTS: "[$HTTP_PORTS,110,143]"
+    FTP_PORTS: 21
+    GENEVE_PORTS: 6081
+    VXLAN_PORTS: 4789
+    TEREDO_PORTS: 3544
+
+# DPDK configuration for high-performance packet capture
+dpdk:
+  eal-params:
+    proc-type: primary
+    lcores: "0-3"
+    memory-channels: 4
+    socket-mem: "1024,1024"
+  interfaces:
+    - interface: 0000:00:08.0  # Update with your DPDK interface PCI address
+      threads: 4
+      rx-queues: 4
+      tx-queues: 4
+      mtu: 1500
+      mempool-size: 65536
+      mempool-cache-size: 256
+      rx-desc: 1024
+      tx-desc: 1024
+
+# Kafka output configuration - NO FILE OUTPUTS
+outputs:
+  # EVE log output to Kafka (main event stream)
+  - eve-log:
+      enabled: yes
+      # NO filename - direct to Kafka
+      kafka:
+        bootstrap-servers: "localhost:9092"  # Update with your Kafka brokers
+        topic: "suricata-events"
+        compression: "snappy"
+        batch-size: 16384
+        linger-ms: 10
+        buffer-memory: 33554432
+        max-request-size: 1048576
+        acks: 1  # 0=no ack, 1=leader ack, all=full ack
+        retries: 3
+        retry-backoff-ms: 100
+        max-in-flight-requests: 5
+        request-timeout-ms: 30000
+        delivery-timeout-ms: 120000
+        partitioner: "consistent_random"  # or "round_robin", "murmur2_random"
+        # Client ID for identification
+        client-id: "suricata-dpdk-producer"
+        # Enable idempotent producer for exactly-once semantics
+        enable-idempotence: yes
+        # Security settings (uncomment if using SSL/SASL)
+        # security-protocol: "SASL_SSL"
+        # sasl-mechanism: "PLAIN"
+        # sasl-username: "username"
+        # sasl-password: "password"
+        # ssl-ca-location: "/path/to/ca-cert"
+        # ssl-certificate-location: "/path/to/client-cert"
+        # ssl-key-location: "/path/to/client-key"
+      types:
+        - alert:
+            metadata: yes
+            tagged-packets: yes
+            xff:
+              enabled: no
+              mode: extra-data
+              deployment: reverse
+              header: X-Forwarded-For
+        - anomaly:
+            enabled: yes
+            types:
+              # Anomaly types to log
+              decode: yes
+              stream: yes
+              applayer: yes
+        - http:
+            enabled: yes
+            extended: yes
+            custom: [Accept, Accept-Charset, Accept-Encoding, Accept-Language,
+                     Accept-Datetime, Authorization, Cache-Control, Cookie,
+                     From, Max-Forwards, Origin, Pragma, Proxy-Authorization,
+                     Range, TE, Via, X-Requested-With, DNT, X-Forwarded-Proto,
+                     Accept-Range, Age, Allow, Connection, Content-Encoding,
+                     Content-Language, Content-Length, Content-Location,
+                     Content-MD5, Content-Range, Content-Type, Date, ETag,
+                     Expires, Last-Modified, Link, Location, Proxy-Authenticate,
+                     Refresh, Retry-After, Server, Set-Cookie, Trailer,
+                     Transfer-Encoding, Upgrade, Vary, WWW-Authenticate,
+                     X-Frame-Options, X-XSS-Protection, X-Content-Type-Options,
+                     X-Forwarded-Proto, X-Forwarded-For, X-Authenticated-User,
+                     X-Forwarded-Host]
+        - dns:
+            enabled: yes
+            query: yes
+            answer: yes
+            # Additional DNS fields
+            custom: [aa, tc, rd, ra, z, authenticated, checking_disabled, recursion_desired]
+        - tls:
+            enabled: yes
+            extended: yes
+            custom: [subject, issuer, serial, fingerprint, sni, version, not_before, not_after, certificate, chain]
+        - files:
+            enabled: yes
+            force-magic: no
+            force-hash: [md5]
+        - smtp:
+            enabled: yes
+            extended: yes
+            custom: [bcc, reply-to, received, x-mailer, x-originating-ip, relays]
+        - ssh:
+            enabled: yes
+        - stats:
+            enabled: yes
+            totals: yes
+            threads: no
+            deltas: no
+        - flow:
+            enabled: yes
+        - netflow:
+            enabled: yes
+        - metadata:
+            enabled: yes
+        - dnp3:
+            enabled: yes
+        - nfs:
+            enabled: yes
+        - smb:
+            enabled: yes
+        - tftp:
+            enabled: yes
+        - ikev2:
+            enabled: yes
+        - krb5:
+            enabled: yes
+        - snmp:
+            enabled: yes
+        - sip:
+            enabled: yes
+        - dhcp:
+            enabled: yes
+        - rfb:
+            enabled: yes
+        - mqtt:
+            enabled: yes
+        - pgsql:
+            enabled: yes
+        - telnet:
+            enabled: yes
+        - cip:
+            enabled: yes
+        - modbus:
+            enabled: yes
+        - rdp:
+            enabled: yes
+
+  # Alert output to separate Kafka topic (for high-priority alerts)
+  - alert-kafka:
+      enabled: yes
+      kafka:
+        bootstrap-servers: "localhost:9092"
+        topic: "suricata-alerts"
+        compression: "snappy"
+        batch-size: 8192
+        linger-ms: 5  # Lower latency for alerts
+        acks: all  # Ensure delivery for critical alerts
+        retries: 5
+        client-id: "suricata-alerts-producer"
+        enable-idempotence: yes
+
+  # Stats output to Kafka (for monitoring)
+  - stats-kafka:
+      enabled: yes
+      interval: 30
+      kafka:
+        bootstrap-servers: "localhost:9092"
+        topic: "suricata-stats"
+        compression: "gzip"
+        batch-size: 4096
+        linger-ms: 1000
+        acks: 1
+        client-id: "suricata-stats-producer"
+
+# NO FILE-BASED LOGGING
+logging:
+  default-log-level: error  # Minimize console output
+  outputs:
+  - console:
+      enabled: no  # Disable console logging
+  # NO file outputs - everything goes to Kafka
+
+# Rule files
+rule-files:
+  - emerging-botcc.rules
+  - emerging-compromise.rules
+  - emerging-trojan.rules
+  - emerging-malware.rules
+  - emerging-scan.rules
+  - emerging-shellcode.rules
+  - emerging-exploit.rules
+  - emerging-attack_response.rules
+  - emerging-inappropriate.rules
+  - emerging-policy.rules
+
+classification-file: /etc/suricata/classification.config
+reference-config-file: /etc/suricata/reference.config
+
+# Threading and performance optimization
+threading:
+  set-cpu-affinity: yes
+  cpu-affinity:
+    - management-cpu-set:
+        cpu: [ 0 ]
+    - receive-cpu-set:
+        cpu: [ 1 ]
+    - worker-cpu-set:
+        cpu: [ "2-7" ]
+        mode: "exclusive"
+        prio:
+          low: [ 2 ]
+          medium: [ "3-5" ]
+          high: [ "6-7" ]
+          default: "medium"
+
+# High-performance settings
+max-pending-packets: 8192
+runmode: workers
+
+# Packet capture settings
+capture:
+  disable-offloading: yes
+
+# Flow settings for high throughput
+flow:
+  memcap: 512mb
+  hash-size: 262144
+  prealloc: 65536
+  emergency-recovery: 30
+
+# Stream settings
+stream:
+  memcap: 256mb
+  checksum-validation: yes
+  inline: auto
+  reassembly:
+    memcap: 512mb
+    depth: 1mb
+    toserver-chunk-size: 2560
+    toclient-chunk-size: 2560
+    randomize-chunk-size: yes
+
+# Host table
+host:
+  hash-size: 16384
+  prealloc: 4096
+  memcap: 128mb
+
+# App layer protocols
+app-layer:
+  protocols:
+    http:
+      enabled: yes
+      memcap: 256mb
+      http-body-inline: auto
+      raw-extraction: no
+      liberal-http-parsing: yes
+    tls:
+      enabled: yes
+      ja3-fingerprints: yes
+    dns:
+      enabled: yes
+      tcp: yes
+      udp: yes
+    smtp:
+      enabled: yes
+      raw-extraction: no
+      mime:
+        decode-mime: yes
+        decode-base64: yes
+        decode-quoted-printable: yes
+        header-value-depth: 2000
+        extract-urls: yes
+        body-md5: yes
+    ssh:
+      enabled: yes
+    ftp:
+      enabled: yes
+    smb:
+      enabled: yes
+    nfs:
+      enabled: yes
+    tftp:
+      enabled: yes
+    ikev2:
+      enabled: yes
+    krb5:
+      enabled: yes
+    snmp:
+      enabled: yes
+    sip:
+      enabled: yes
+    dhcp:
+      enabled: yes
+
+# Performance tuning
+profiling:
+  rules:
+    enabled: no
+    # No file output - profiling disabled for direct Kafka streaming
+    append: yes
+    sort: avgticks
+    limit: 100
+    json: yes
+
+# Decode settings
+decoder:
+  teredo:
+    enabled: true
+    ports:
+      destination: [3544]
+  vxlan:
+    enabled: true
+    ports: [4789, 8472]
+  geneve:
+    enabled: true
+    ports: [6081]
+  max-layers: 16
+
+# Detection engine settings
+detect:
+  profile: high
+  custom-values:
+    toclient-groups: 3
+    toserver-groups: 25
+  sgh-mpm-context: auto
+  inspection-recursion-limit: 3000
+  prefilter:
+    default: mpm
+  grouping:
+    tcp-whitelist: 53, 80, 139, 443, 445, 1433, 3306, 5432, 6379
+    udp-whitelist: 53, 135, 5060
+
+# Kafka producer optimizations
+kafka:
+  # Global Kafka settings
+  default-topic-config:
+    request-required-acks: 1
+    message-send-max-retries: 3
+    retry-backoff-ms: 100
+  producer-config:
+    # Producer performance settings
+    queue-buffering-max-messages: 100000
+    queue-buffering-max-ms: 1000
+    batch-num-messages: 1000
+    compression-codec: snappy
+    # Reliability settings
+    request-timeout-ms: 30000
+    message-timeout-ms: 300000

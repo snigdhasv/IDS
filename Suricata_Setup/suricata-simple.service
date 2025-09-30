@@ -1,0 +1,27 @@
+[Unit]
+Description=Suricata IDS/IPS with Kafka Output (Simple Mode)
+After=network.target kafka.service
+Wants=kafka.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStartPre=/bin/rm -f /var/run/suricata-simple.pid
+ExecStart=/usr/local/bin/suricata -c /etc/suricata/suricata-simple.yaml -i enp2s0 -v
+ExecReload=/bin/kill -USR2 $MAINPID
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=10
+PIDFile=/var/run/suricata-simple.pid
+
+# Security settings
+NoNewPrivileges=false
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/log /var/run /var/lib/suricata /tmp
+
+[Install]
+WantedBy=multi-user.target

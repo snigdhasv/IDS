@@ -1,0 +1,184 @@
+%YAML 1.1
+---
+
+# Suricata configuration for standard network interface with direct Kafka output
+# NO FILE OUTPUTS - All events stream directly to Kafka
+
+vars:
+  address-groups:
+    HOME_NET: "[192.168.0.0/16,10.0.0.0/8,172.16.0.0/12]"
+    EXTERNAL_NET: "!$HOME_NET"
+    HTTP_SERVERS: "$HOME_NET"
+    SMTP_SERVERS: "$HOME_NET"
+    SQL_SERVERS: "$HOME_NET"
+    DNS_SERVERS: "$HOME_NET"
+    TELNET_SERVERS: "$HOME_NET"
+    AIM_SERVERS: "$EXTERNAL_NET"
+    DC_SERVERS: "$HOME_NET"
+  port-groups:
+    HTTP_PORTS: "80"
+    SHELLCODE_PORTS: "!80"
+    ORACLE_PORTS: 1521
+    SSH_PORTS: 22
+    FILE_DATA_PORTS: "[$HTTP_PORTS,110,143]"
+    FTP_PORTS: 21
+
+# Standard interface configuration (not DPDK)
+af-packet:
+  - interface: enp2s0  # Main network interface
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+    threads: 4
+
+# Kafka output configuration - NO FILE OUTPUTS
+outputs:
+  # EVE log output to Kafka (main event stream)
+  - eve-log:
+      enabled: yes
+      # NO filename - direct to Kafka only
+      kafka:
+        bootstrap-servers: "localhost:9092"
+        topic: "suricata-events"
+        compression: "snappy"
+        batch-size: 16384
+        linger-ms: 10
+        buffer-memory: 33554432
+        max-request-size: 1048576
+        acks: 1
+        retries: 3
+        retry-backoff-ms: 100
+        max-in-flight-requests: 5
+        request-timeout-ms: 30000
+        delivery-timeout-ms: 120000
+        partitioner: "consistent_random"
+        client-id: "suricata-producer"
+        enable-idempotence: yes
+      types:
+        - alert:
+            metadata: yes
+            tagged-packets: yes
+        - http:
+            enabled: yes
+            extended: yes
+        - dns:
+            enabled: yes
+            query: yes
+            answer: yes
+        - tls:
+            enabled: yes
+            extended: yes
+        - files:
+            enabled: yes
+            force-magic: no
+            force-hash: [md5]
+        - smtp:
+            enabled: yes
+            extended: yes
+        - ssh:
+            enabled: yes
+        - stats:
+            enabled: yes
+            totals: yes
+            threads: no
+            deltas: no
+        - flow:
+            enabled: yes
+
+  # Note: Using only eve-log with kafka for now
+  # Separate alert-kafka and stats-kafka modules may not be available in this build
+
+# NO FILE-BASED LOGGING
+logging:
+  default-log-level: error
+  outputs:
+  - console:
+      enabled: no
+
+# Rule files
+rule-files:
+  - /var/lib/suricata/rules/suricata.rules
+
+# Threading
+threading:
+  set-cpu-affinity: no
+  cpu-affinity:
+    - management-cpu-set:
+        cpu: [ 0 ]
+    - receive-cpu-set:
+        cpu: [ 1 ]
+    - worker-cpu-set:
+        cpu: [ "2-3" ]
+        mode: "exclusive"
+        prio:
+          default: "medium"
+
+# High-performance settings
+max-pending-packets: 1024
+runmode: workers
+
+# Flow settings
+flow:
+  memcap: 128mb
+  hash-size: 65536
+  prealloc: 10000
+  emergency-recovery: 30
+
+# Stream settings
+stream:
+  memcap: 64mb
+  checksum-validation: yes
+  inline: auto
+  reassembly:
+    memcap: 128mb
+    depth: 1mb
+    toserver-chunk-size: 2560
+    toclient-chunk-size: 2560
+    randomize-chunk-size: yes
+
+# App layer protocols
+app-layer:
+  protocols:
+    http:
+      enabled: yes
+      memcap: 64mb
+    tls:
+      enabled: yes
+      ja3-fingerprints: yes
+    dns:
+      enabled: yes
+      tcp: yes
+      udp: yes
+    smtp:
+      enabled: yes
+    ssh:
+      enabled: yes
+    ftp:
+      enabled: yes
+
+# Detection engine settings
+detect:
+  profile: medium
+  custom-values:
+    toclient-groups: 3
+    toserver-groups: 25
+  sgh-mpm-context: auto
+  inspection-recursion-limit: 3000
+
+# Performance tuning - NO FILE OUTPUT
+profiling:
+  rules:
+    enabled: no
+    # No file output - profiling disabled for direct Kafka streaming
+    append: yes
+    sort: avgticks
+    limit: 100
+    json: yes
+
+# Decode settings
+decoder:
+  teredo:
+    enabled: true
+  vxlan:
+    enabled: true
+  max-layers: 16
