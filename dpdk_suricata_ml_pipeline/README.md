@@ -1,8 +1,13 @@
 # DPDK-Suricata-Kafka-ML Complete Pipeline
 
-## Architecture Overview
+## 🚀 Quick Links
 
-# DPDK-Suricata-Kafka-ML Complete Pipeline
+- **[⚡ QUICKSTART - Run Now!](QUICKSTART.md)** - Get the pipeline running in 5 minutes
+- **[📖 Runtime Guide](RUNTIME_GUIDE.md)** - Complete step-by-step execution guide
+- **[🔧 Setup Guide](SETUP_GUIDE.md)** - Installation and configuration
+- **[🧠 ML Architecture](FLOW_BASED_ML_ARCHITECTURE.md)** - Flow-based ML design
+
+---
 
 ## Architecture Overview
 
