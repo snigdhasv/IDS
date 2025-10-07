@@ -31,12 +31,16 @@ from feature_extractor import CICIDS2017FeatureExtractor
 from model_loader import MLModelLoader
 from alert_processor import AlertProcessor
 
-# Configure logging
+# Configure logging - create log directory if it doesn't exist
+LOG_DIR = Path(__file__).parent.parent / 'logs' / 'ml'
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / 'ml_consumer.log'
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('../logs/ml/ml_consumer.log'),
+        logging.FileHandler(LOG_FILE),
         logging.StreamHandler()
     ]
 )

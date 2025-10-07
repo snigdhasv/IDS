@@ -117,9 +117,39 @@ echo -e "\n${BOLD}Available Topics:${NC}"
 
 # Install Python Kafka library
 echo -e "\n${BLUE}Installing Python Kafka library...${NC}"
-source "$(dirname "$SCRIPT_DIR")/venv/bin/activate" 2>/dev/null || true
-pip install kafka-python confluent-kafka > /dev/null
-echo -e "${GREEN}✓ Python Kafka libraries installed${NC}"
+
+# Determine venv path
+VENV_PATH="$(dirname "$SCRIPT_DIR")/venv"
+
+# Create venv if it doesn't exist
+if [ ! -d "$VENV_PATH" ]; then
+    echo -e "${YELLOW}Virtual environment not found at $VENV_PATH${NC}"
+    echo -e "${BLUE}Creating virtual environment...${NC}"
+    python3 -m venv "$VENV_PATH"
+    echo -e "${GREEN}✓ Virtual environment created${NC}"
+fi
+
+# Activate venv and install packages
+if [ -f "$VENV_PATH/bin/activate" ]; then
+    source "$VENV_PATH/bin/activate"
+    pip install --upgrade pip > /dev/null 2>&1
+    pip install kafka-python confluent-kafka > /dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✓ Python Kafka libraries installed in venv${NC}"
+    else
+        echo -e "${RED}❌ Failed to install Python Kafka libraries${NC}"
+        echo -e "${YELLOW}⚠️  You can install manually:${NC}"
+        echo -e "    ${CYAN}source $VENV_PATH/bin/activate${NC}"
+        echo -e "    ${CYAN}pip install kafka-python confluent-kafka${NC}"
+    fi
+    deactivate
+else
+    echo -e "${RED}❌ Failed to create/activate virtual environment${NC}"
+    echo -e "${YELLOW}⚠️  You can install manually:${NC}"
+    echo -e "    ${CYAN}python3 -m venv $VENV_PATH${NC}"
+    echo -e "    ${CYAN}source $VENV_PATH/bin/activate${NC}"
+    echo -e "    ${CYAN}pip install kafka-python confluent-kafka${NC}"
+fi
 
 echo -e "\n${BOLD}${GREEN}╔════════════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}${GREEN}║  Kafka Setup Complete                          ║${NC}"

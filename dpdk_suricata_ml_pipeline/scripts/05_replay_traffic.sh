@@ -32,7 +32,7 @@ if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 else
     echo -e "${YELLOW}⚠️  Using default configuration${NC}"
-    NETWORK_INTERFACE="eth0"
+    NETWORK_INTERFACE="enx00e04c36074c"
     PCAP_REPLAY_SPEED="10"
     PCAP_LOOP_COUNT="1"
 fi
