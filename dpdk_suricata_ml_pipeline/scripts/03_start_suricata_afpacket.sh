@@ -91,6 +91,19 @@ if [ ! -f "$AFPACKET_CONFIG" ]; then
     AFPACKET_CONFIG="/etc/suricata/suricata.yaml"
 fi
 
+# Check if Suricata is already running
+if pgrep -x suricata > /dev/null 2>&1 || [ -f /var/run/suricata.pid ]; then
+    echo -e "${YELLOW}⚠️  Suricata is already running${NC}"
+    PID=$(pgrep -x suricata 2>/dev/null || cat /var/run/suricata.pid 2>/dev/null)
+    echo -e "${CYAN}Current PID:${NC} $PID"
+    echo
+    echo -e "${BOLD}Process Info:${NC}"
+    ps aux | grep "[s]uricata" | grep -v grep
+    echo
+    echo -e "${GREEN}✓ Suricata is already running - no action needed${NC}"
+    exit 0
+fi
+
 # Display configuration
 echo -e "${CYAN}Configuration:${NC}"
 echo -e "  Interface: $NETWORK_INTERFACE"

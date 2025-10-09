@@ -32,9 +32,16 @@ else
 fi
 
 # Check if Kafka is already installed
-if command -v kafka-server-start.sh &> /dev/null; then
-    echo -e "${GREEN}✓ Kafka already installed${NC}"
+KAFKA_DIR="/opt/kafka"
+if [ -d "$KAFKA_DIR" ] && [ -f "$KAFKA_DIR/bin/kafka-server-start.sh" ]; then
+    echo -e "${GREEN}✓ Kafka already installed at $KAFKA_DIR${NC}"
     KAFKA_INSTALLED=true
+    # Add to PATH for this session
+    export PATH=$PATH:$KAFKA_DIR/bin
+elif command -v kafka-server-start.sh &> /dev/null; then
+    echo -e "${GREEN}✓ Kafka already installed (in PATH)${NC}"
+    KAFKA_INSTALLED=true
+    KAFKA_DIR=$(dirname $(dirname $(which kafka-server-start.sh)))
 else
     echo -e "${YELLOW}Kafka not found. Installing...${NC}"
     KAFKA_INSTALLED=false
@@ -58,10 +65,12 @@ if [ "$KAFKA_INSTALLED" = false ]; then
     if ! grep -q "kafka/bin" ~/.bashrc; then
         echo 'export PATH=$PATH:/opt/kafka/bin' >> ~/.bashrc
     fi
-    export PATH=$PATH:/opt/kafka/bin
     
     echo -e "${GREEN}✓ Kafka installed to $KAFKA_DIR${NC}"
 fi
+
+# Always use full path to Kafka commands
+KAFKA_BIN="$KAFKA_DIR/bin"
 
 # Check if Kafka is running
 if netstat -tuln 2>/dev/null | grep -q ":9092"; then
@@ -71,12 +80,12 @@ else
     
     # Start Zookeeper in background
     echo -e "${CYAN}Starting Zookeeper...${NC}"
-    /opt/kafka/bin/zookeeper-server-start.sh -daemon /opt/kafka/config/zookeeper.properties
+    $KAFKA_BIN/zookeeper-server-start.sh -daemon $KAFKA_DIR/config/zookeeper.properties
     sleep 5
     
     # Start Kafka in background
     echo -e "${CYAN}Starting Kafka broker...${NC}"
-    /opt/kafka/bin/kafka-server-start.sh -daemon /opt/kafka/config/server.properties
+    $KAFKA_BIN/kafka-server-start.sh -daemon $KAFKA_DIR/config/server.properties
     sleep 5
     
     # Verify
@@ -92,7 +101,7 @@ fi
 echo -e "\n${BLUE}Creating Kafka topics...${NC}"
 
 # Suricata alerts topic
-/opt/kafka/bin/kafka-topics.sh --create \
+$KAFKA_BIN/kafka-topics.sh --create \
     --bootstrap-server "$KAFKA_BOOTSTRAP_SERVERS" \
     --topic "$KAFKA_TOPIC_ALERTS" \
     --partitions 3 \
@@ -102,7 +111,7 @@ echo -e "\n${BLUE}Creating Kafka topics...${NC}"
     echo -e "${YELLOW}⚠️  Topic $KAFKA_TOPIC_ALERTS already exists${NC}"
 
 # ML predictions topic
-/opt/kafka/bin/kafka-topics.sh --create \
+$KAFKA_BIN/kafka-topics.sh --create \
     --bootstrap-server "$KAFKA_BOOTSTRAP_SERVERS" \
     --topic "$KAFKA_TOPIC_ML_PREDICTIONS" \
     --partitions 3 \
@@ -113,7 +122,7 @@ echo -e "\n${BLUE}Creating Kafka topics...${NC}"
 
 # List topics
 echo -e "\n${BOLD}Available Topics:${NC}"
-/opt/kafka/bin/kafka-topics.sh --list --bootstrap-server "$KAFKA_BOOTSTRAP_SERVERS"
+$KAFKA_BIN/kafka-topics.sh --list --bootstrap-server "$KAFKA_BOOTSTRAP_SERVERS"
 
 # Install Python Kafka library
 echo -e "\n${BLUE}Installing Python Kafka library...${NC}"
@@ -163,11 +172,11 @@ echo -e "  Predictions Topic: ${CYAN}$KAFKA_TOPIC_ML_PREDICTIONS${NC}"
 echo
 
 echo -e "${BOLD}Useful Commands:${NC}"
-echo -e "  List topics:  ${CYAN}kafka-topics.sh --list --bootstrap-server $KAFKA_BOOTSTRAP_SERVERS${NC}"
-echo -e "  Consume:      ${CYAN}kafka-console-consumer.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVERS --topic $KAFKA_TOPIC_ALERTS${NC}"
-echo -e "  Produce:      ${CYAN}kafka-console-producer.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVERS --topic $KAFKA_TOPIC_ALERTS${NC}"
-echo -e "  Stop Kafka:   ${CYAN}/opt/kafka/bin/kafka-server-stop.sh${NC}"
-echo -e "  Stop Zookeeper: ${CYAN}/opt/kafka/bin/zookeeper-server-stop.sh${NC}"
+echo -e "  List topics:  ${CYAN}$KAFKA_BIN/kafka-topics.sh --list --bootstrap-server $KAFKA_BOOTSTRAP_SERVERS${NC}"
+echo -e "  Consume:      ${CYAN}$KAFKA_BIN/kafka-console-consumer.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVERS --topic $KAFKA_TOPIC_ALERTS${NC}"
+echo -e "  Produce:      ${CYAN}$KAFKA_BIN/kafka-console-producer.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVERS --topic $KAFKA_TOPIC_ALERTS${NC}"
+echo -e "  Stop Kafka:   ${CYAN}$KAFKA_BIN/kafka-server-stop.sh${NC}"
+echo -e "  Stop Zookeeper: ${CYAN}$KAFKA_BIN/zookeeper-server-stop.sh${NC}"
 echo
 
 echo -e "${GREEN}✓ Done!${NC}"

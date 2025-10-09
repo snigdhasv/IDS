@@ -39,6 +39,19 @@ else
     echo -e "${YELLOW}⚠️  ML Consumer not running${NC}"
 fi
 
+# Stop Suricata→Kafka Bridge
+echo -e "\n${BLUE}Stopping Suricata→Kafka Bridge...${NC}"
+if pgrep -f "suricata_kafka_bridge.py" > /dev/null; then
+    pkill -f "suricata_kafka_bridge.py"
+    sleep 2
+    if pgrep -f "suricata_kafka_bridge.py" > /dev/null; then
+        pkill -9 -f "suricata_kafka_bridge.py"
+    fi
+    echo -e "${GREEN}✓ Bridge stopped${NC}"
+else
+    echo -e "${YELLOW}⚠️  Bridge not running${NC}"
+fi
+
 # Stop Suricata
 echo -e "\n${BLUE}Stopping Suricata...${NC}"
 if pgrep -x "suricata" > /dev/null; then
@@ -47,6 +60,8 @@ if pgrep -x "suricata" > /dev/null; then
     if pgrep -x "suricata" > /dev/null; then
         killall -9 suricata 2>/dev/null || true
     fi
+    # Remove PID file if it exists
+    rm -f /var/run/suricata.pid 2>/dev/null || true
     echo -e "${GREEN}✓ Suricata stopped${NC}"
 else
     echo -e "${YELLOW}⚠️  Suricata not running${NC}"

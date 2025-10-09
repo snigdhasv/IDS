@@ -28,6 +28,7 @@ from kafka.errors import KafkaError
 
 # Import our custom modules
 from feature_extractor import CICIDS2017FeatureExtractor
+from feature_mapper import FeatureMapper
 from model_loader import MLModelLoader
 from alert_processor import AlertProcessor
 
@@ -79,6 +80,7 @@ class MLEnhancedKafkaConsumer:
         
         # Initialize components
         self.feature_extractor = CICIDS2017FeatureExtractor()
+        self.feature_mapper = FeatureMapper(target_features=34)  # Map 65→34 features
         self.model_loader = MLModelLoader()
         self.alert_processor = AlertProcessor()
         
@@ -174,8 +176,8 @@ class MLEnhancedKafkaConsumer:
                 group_id=self.config['kafka_group_id'],
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                 auto_offset_reset='latest',
-                enable_auto_commit=True,
-                consumer_timeout_ms=1000
+                enable_auto_commit=True
+                # Using poll() method, no consumer_timeout_ms needed
             )
             
             # Initialize Kafka producer
@@ -220,22 +222,33 @@ class MLEnhancedKafkaConsumer:
         stats_interval = 30  # Print stats every 30 seconds
         
         try:
-            for message in self.consumer:
-                if not self.running:
-                    break
+            # Use polling loop instead of iterator for better control
+            while self.running:
+                # Poll for messages (10 second timeout per poll)
+                messages = self.consumer.poll(timeout_ms=10000, max_records=100)
                 
-                try:
-                    event = message.value
-                    self.process_event(event)
-                    
-                    # Print periodic stats
-                    if time.time() - last_stats_time > stats_interval:
-                        self._print_stats()
-                        last_stats_time = time.time()
+                if not messages:
+                    # No messages in this poll, continue waiting
+                    continue
+                
+                # Process all messages from this poll
+                for topic_partition, records in messages.items():
+                    for message in records:
+                        if not self.running:
+                            break
                         
-                except Exception as e:
-                    logger.error(f"Error processing message: {e}", exc_info=True)
-                    self.stats['errors'] += 1
+                        try:
+                            event = message.value
+                            self.process_event(event)
+                            
+                        except Exception as e:
+                            logger.error(f"Error processing message: {e}", exc_info=True)
+                            self.stats['errors'] += 1
+                
+                # Print periodic stats
+                if time.time() - last_stats_time > stats_interval:
+                    self._print_stats()
+                    last_stats_time = time.time()
         
         except KeyboardInterrupt:
             logger.info("Received interrupt signal")
@@ -281,12 +294,15 @@ class MLEnhancedKafkaConsumer:
                 logger.debug("Feature extraction failed for flow")
                 return
             
-            # Convert features to numpy array
-            feature_vector = self.feature_extractor.get_feature_vector(features)
-            feature_array = np.array([feature_vector])
+            # Map 65 features to 34 features for model compatibility
+            feature_array = self.feature_mapper.map_to_34(features)
             
-            # ML prediction
-            prediction, confidence = self.model_loader.predict(feature_array)
+            # ML prediction with confidence
+            predictions = self.model_loader.predict(feature_array)
+            probabilities = self.model_loader.predict_proba(feature_array)
+            
+            prediction = predictions[0] if len(predictions) > 0 else 'BENIGN'
+            confidence = float(np.max(probabilities[0])) if len(probabilities) > 0 else 0.0
             self.stats['ml_predictions'] += 1
             
             if prediction and prediction != 'BENIGN':

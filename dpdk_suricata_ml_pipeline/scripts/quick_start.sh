@@ -45,15 +45,19 @@ case $choice in
     1)
         echo -e "\n${BOLD}${BLUE}Starting Complete Pipeline...${NC}\n"
         
-        echo -e "${CYAN}Step 1/3: Starting Kafka...${NC}"
+        echo -e "${CYAN}Step 1/4: Starting Kafka...${NC}"
         sudo "${SCRIPT_DIR}/02_setup_kafka.sh"
         sleep 2
         
-        echo -e "\n${CYAN}Step 2/3: Starting Suricata (AF_PACKET mode)...${NC}"
+        echo -e "\n${CYAN}Step 2/4: Starting Suricata (AF_PACKET mode)...${NC}"
         sudo "${SCRIPT_DIR}/03_start_suricata_afpacket.sh"
         sleep 2
         
-        echo -e "\n${CYAN}Step 3/3: Starting ML Consumer...${NC}"
+        echo -e "\n${CYAN}Step 3/4: Starting Suricata→Kafka Bridge...${NC}"
+        "${SCRIPT_DIR}/06_start_kafka_bridge.sh"
+        sleep 2
+        
+        echo -e "\n${CYAN}Step 4/4: Starting ML Consumer...${NC}"
         "${SCRIPT_DIR}/04_start_ml_consumer.sh" &
         sleep 2
         
@@ -92,11 +96,19 @@ case $choice in
         fi
         
         echo -e "\n${CYAN}═══ Suricata Status ═══${NC}"
-        if pgrep -x suricata > /dev/null; then
+        if ps aux | grep -q "[s]uricata.*--af-packet"; then
             echo -e "${GREEN}✓ Suricata is running${NC}"
-            ps aux | grep "[s]uricata"
+            ps aux | grep "[s]uricata.*--af-packet"
         else
             echo -e "${RED}✗ Suricata is not running${NC}"
+        fi
+        
+        echo -e "\n${CYAN}═══ Suricata→Kafka Bridge Status ═══${NC}"
+        if pgrep -f "suricata_kafka_bridge" > /dev/null; then
+            echo -e "${GREEN}✓ Bridge is running${NC}"
+            ps aux | grep "[s]uricata_kafka_bridge"
+        else
+            echo -e "${RED}✗ Bridge is not running${NC}"
         fi
         
         echo -e "\n${CYAN}═══ ML Consumer Status ═══${NC}"
