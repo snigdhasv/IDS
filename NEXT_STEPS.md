@@ -12,86 +12,280 @@
 
 ## Immediate Priorities
 
-### 1. 🧪 Testing & Validation
+### PHASE 1: Model Testing & Validation (Week 1-2)
 
-#### Test the Cleaned Codebase
-- [ ] **Test AF_PACKET Pipeline**
-  - Run `sudo ./run_afpacket_mode.sh start`
-  - Verify all components start successfully
-  - Generate test traffic using `tests/test_benign_traffic.py`
-  - Confirm ML predictions are generated
+#### 1.1 🤖 Test All ML Models
+
+**Goal:** Validate all existing models and log comprehensive metrics
+
+- [ ] **Test Individual Models**
+  - [ ] Random Forest (CICIDS2017) - `ML Models/random_forest_model_2017.joblib`
+    - Load model and verify it works with current pipeline
+    - Test with CICIDS2017 dataset samples
+    - Log: Accuracy, Precision, Recall, F1-score, Confidence scores
   
-- [ ] **Test DPDK Pipeline** (if DPDK-compatible hardware available)
-  - Run `sudo ./run_dpdk_mode.sh start`
-  - Verify interface binding works
-  - Test with high-volume traffic
-  - Measure packet loss and throughput
+  - [ ] LightGBM (CICIDS2018) - `ML Models/lgb_model_2018.joblib`
+    - Load model and verify it works with current pipeline
+    - Test with CICIDS2018 dataset samples
+    - Log: Accuracy, Precision, Recall, F1-score, Confidence scores
   
-- [ ] **Run Unit Tests**
+- [ ] **Test Ensemble Models**
+  - [ ] Adaptive Ensemble - `utils/adaptive_ensemble_predictor.py`
+    - Test voting mechanism (RF + LightGBM)
+    - Compare ensemble vs individual model performance
+    - Log: Combined accuracy, confidence distributions, decision weights
+  
+  - [ ] Standard Ensemble - `tests/test_ensemble_model.py`
+    - Verify ensemble integration with pipeline
+    - Test weighted averaging
+    - Log: Performance improvements over single models
+
+- [ ] **Pipeline Integration Testing**
+  - [ ] Verify each model receives correct 65 CICIDS features
+  - [ ] Test feature mapping (65 → 34) for each model
+  - [ ] Confirm Kafka integration for all models
+  - [ ] Test model switching/hot-swapping capability
+
+#### 1.2 📊 Metrics Collection & Logging
+
+**Create comprehensive logging system for model performance**
+
+- [ ] **Model Performance Metrics**
+  - [ ] Accuracy (per attack type)
+  - [ ] Precision & Recall (per class)
+  - [ ] F1-score (weighted & macro)
+  - [ ] Confusion matrices
+  - [ ] ROC-AUC scores
+  - [ ] Confidence score distributions (0.0-1.0)
+  - [ ] False positive/negative rates
+
+- [ ] **Attack Detection Breakdown**
+  - [ ] BENIGN detection rate
+  - [ ] DDoS detection (SYN, UDP, HTTP flood)
+  - [ ] Port Scan detection (Nmap patterns)
+  - [ ] Brute Force detection (SSH, FTP)
+  - [ ] Web Attack detection (SQL injection, XSS)
+  - [ ] Botnet detection (C&C patterns)
+  - [ ] Infiltration detection
+
+- [ ] **Create Metrics Logger Script**
   ```bash
-  cd tests/
-  python3 test_ml_classifications.py
-  python3 test_ensemble_model.py
-  python3 test_adaptive_ensemble.py
+  # New script: utils/model_metrics_logger.py
+  - Real-time metric collection
+  - CSV/JSON output for analysis
+  - Per-model comparison dashboard
+  - Confidence threshold analysis
   ```
 
-#### Performance Benchmarking
-- [ ] Create benchmark script to measure:
-  - **Packets per second (PPS)** processing rate
-  - **Latency**: Time from capture to ML prediction
-  - **Accuracy**: False positive/negative rates
-  - **Resource usage**: CPU, memory, disk I/O
-  
-- [ ] Document baseline performance metrics
-- [ ] Create performance regression tests
+- [ ] **Generate Model Comparison Report**
+  - Side-by-side performance comparison
+  - Best model per attack type
+  - Ensemble improvement quantification
+  - Recommendations for production use
 
-### 2. 📊 Visualization & Monitoring
+---
 
-#### Real-time Dashboard
-- [ ] **Setup Elasticsearch + Kibana**
-  - Consume `ml-predictions` topic
-  - Index enhanced alerts
-  - Create real-time visualization dashboards
-  
-- [ ] **Dashboard Components**:
-  - Live traffic map (GeoIP visualization)
-  - Attack type distribution (pie chart)
-  - Alert timeline (time series)
-  - Top attackers/targets (tables)
-  - Threat score heatmap
-  - ML model performance metrics
+### PHASE 2: Pipeline Performance Testing (Week 2-3)
 
-#### Monitoring & Alerting
-- [ ] **Prometheus Integration**
-  - Expose metrics from ML consumer
-  - Track: events/sec, prediction latency, queue sizes
-  
-- [ ] **Grafana Dashboards**
-  - System health monitoring
-  - Pipeline throughput graphs
-  - Error rate tracking
-  
-- [ ] **Alert Notifications**
-  - Email alerts for critical threats
-  - Slack/Discord webhooks
-  - SMS for high-priority incidents
+#### 2.1 ⚡ AF_PACKET Mode Benchmarking
 
-### 3. 📝 Documentation
+- [ ] **Throughput Testing**
+  - [ ] Packets Per Second (PPS) - Measure max processing rate
+  - [ ] Mbps throughput - Network bandwidth handling
+  - [ ] Concurrent connections - Maximum simultaneous flows
+  - [ ] Queue sizes - Kafka, Suricata buffer analysis
 
-- [ ] **Update README.md**
-  - Add performance benchmarks
-  - Include troubleshooting section
-  - Add FAQ section
+- [ ] **Latency Measurements**
+  - [ ] Packet capture → Suricata detection (µs)
+  - [ ] Suricata → Kafka publish (ms)
+  - [ ] Kafka → ML consumer read (ms)
+  - [ ] ML feature extraction → prediction (ms)
+  - [ ] Total end-to-end latency (ms)
+  - [ ] 95th/99th percentile latency
+
+- [ ] **Accuracy & Quality**
+  - [ ] Packet drop rate (%)
+  - [ ] False positive rate (per 1000 flows)
+  - [ ] False negative rate (missed attacks)
+  - [ ] Detection accuracy per traffic volume
+
+- [ ] **Resource Usage**
+  - [ ] CPU utilization (per core, average %)
+  - [ ] Memory consumption (RSS, heap)
+  - [ ] Disk I/O (read/write MB/s)
+  - [ ] Network I/O (bytes in/out)
+  - [ ] System load average
+
+- [ ] **Create Benchmark Script**
+  ```bash
+  # New: tests/benchmark_afpacket.py
+  - Automated testing with various traffic loads
+  - Generate performance report
+  - Identify bottlenecks
+  ```
+
+#### 2.2 🚀 DPDK Mode Benchmarking (If hardware available)
+
+- [ ] **High-Performance Metrics**
+  - [ ] PPS (target: 10M+ pps)
+  - [ ] Multi-Gbps throughput (1/10/40 Gbps)
+  - [ ] Packet loss at high loads
+  - [ ] CPU core utilization per DPDK worker
+  - [ ] Hugepage usage efficiency
+
+- [ ] **DPDK-Specific Testing**
+  - [ ] Interface binding/unbinding stability
+  - [ ] PMD (Poll Mode Driver) performance
+  - [ ] Zero-copy efficiency
+  - [ ] Multi-queue performance
+
+- [ ] **Comparison Report**
+  - [ ] AF_PACKET vs DPDK performance matrix
+  - [ ] Cost/benefit analysis
+  - [ ] Use case recommendations
+
+#### 2.3 � Performance Visualization
+
+- [ ] **Create Real-time Monitoring**
+  - [ ] Live metrics dashboard (terminal UI)
+  - [ ] Performance graphs (matplotlib/plotly)
+  - [ ] Bottleneck identification
+  - [ ] Alerting for performance degradation
+
+---
+
+### PHASE 3: Dashboard Architecture Design (Week 3-4)
+
+#### 3.1 🎨 Dashboard Requirements & Design
+
+- [ ] **Define Dashboard Architecture**
+  - [ ] Choose technology stack:
+    - **Option A**: Elasticsearch + Kibana (ELK Stack)
+    - **Option B**: Prometheus + Grafana
+    - **Option C**: InfluxDB + Grafana
+    - **Option D**: Custom (React + WebSocket + D3.js)
   
-- [ ] **Create Video Tutorials**
-  - Setup walkthrough
-  - Live demo of attack detection
-  - Configuration guide
+  - [ ] Data flow architecture:
+    ```
+    Kafka (ml-predictions) → Data Sink → Database → Visualization
+    ```
+
+- [ ] **Design Dashboard Components**
   
-- [ ] **API Documentation**
-  - Document Kafka message schemas
-  - ML model input/output formats
-  - Configuration parameters
+  **Real-time Monitoring Panel:**
+  - [ ] Live threat map (GeoIP-based)
+  - [ ] Attack type distribution (pie/bar chart)
+  - [ ] Timeline of alerts (last 1h/24h/7d)
+  - [ ] Top 10 attackers (IP addresses)
+  - [ ] Top 10 targets (internal IPs)
+  - [ ] Threat level gauge (LOW/MEDIUM/HIGH/CRITICAL)
+
+  **ML Model Performance Panel:**
+  - [ ] Model accuracy metrics (real-time)
+  - [ ] Confidence score distribution
+  - [ ] Prediction rate (predictions/sec)
+  - [ ] Model comparison (RF vs LightGBM vs Ensemble)
+  - [ ] Feature importance visualization
+
+  **Pipeline Health Panel:**
+  - [ ] Component status (Kafka, Suricata, ML Consumer)
+  - [ ] Throughput graphs (PPS, Mbps)
+  - [ ] Latency graphs (P50, P95, P99)
+  - [ ] Resource usage (CPU, Memory, Network)
+  - [ ] Error rates and exceptions
+
+  **Attack Deep-Dive Panel:**
+  - [ ] Per-attack-type statistics
+  - [ ] Attack timeline visualization
+  - [ ] Packet details (on-demand PCAP viewer)
+  - [ ] Correlation graphs (multi-stage attacks)
+
+#### 3.2 🛠️ Technology Stack Selection
+
+- [ ] **Evaluate Options:**
+  
+  **ELK Stack (Elasticsearch + Kibana):**
+  - ✅ Rich visualization options
+  - ✅ Great for log analysis
+  - ✅ Built-in alerting
+  - ❌ Resource-intensive
+  - ❌ Complex setup
+  
+  **Prometheus + Grafana:**
+  - ✅ Excellent for metrics
+  - ✅ Lightweight
+  - ✅ Easy setup
+  - ❌ Not ideal for logs
+  - ❌ Time-series focused
+  
+  **Custom Dashboard:**
+  - ✅ Full control
+  - ✅ Tailored to needs
+  - ❌ Development time
+  - ❌ Maintenance burden
+
+- [ ] **Make Technology Decision**
+  - [ ] Document pros/cons
+  - [ ] Consider team skills
+  - [ ] Evaluate resource constraints
+  - [ ] Choose stack and document rationale
+
+#### 3.3 📐 Architecture Documentation
+
+- [ ] **Create Dashboard Architecture Document**
+  - Data ingestion pipeline
+  - Storage architecture
+  - Query optimization strategies
+  - Visualization component layout
+  - API design (if custom dashboard)
+  - Security considerations (auth, access control)
+
+- [ ] **Create Implementation Plan**
+  - [ ] Phase 1: Data ingestion setup
+  - [ ] Phase 2: Database/storage setup
+  - [ ] Phase 3: Basic dashboards
+  - [ ] Phase 4: Advanced visualizations
+  - [ ] Phase 5: Alerting integration
+
+---
+
+### PHASE 4: Documentation & Cleanup (Week 4)
+
+- [ ] **Update Documentation**
+  - [ ] Model performance comparison report
+  - [ ] Pipeline benchmark results
+  - [ ] Dashboard architecture guide
+  - [ ] Updated README with findings
+
+- [ ] **Code Cleanup**
+  - [ ] Remove unused test scripts
+  - [ ] Consolidate duplicate code
+  - [ ] Add docstrings to new scripts
+  - [ ] Update requirements.txt
+
+---
+
+## Summary: Immediate Action Plan (4 Weeks)
+
+### Week 1: ML Model Testing
+- Test RF, LightGBM, Ensemble models
+- Collect comprehensive metrics
+- Generate model comparison report
+
+### Week 2: AF_PACKET Performance
+- Benchmark PPS, latency, accuracy
+- Measure resource usage
+- Document performance baseline
+
+### Week 3: DPDK Testing + Dashboard Design
+- DPDK benchmarks (if available)
+- Design dashboard architecture
+- Choose technology stack
+
+### Week 4: Dashboard Implementation Planning
+- Create detailed implementation plan
+- Document architecture decisions
+- Update all documentation
 
 ---
 
@@ -99,43 +293,76 @@
 
 ### 4. 🤖 Machine Learning Enhancements
 
-#### Model Improvements
-- [ ] **Train on Latest Datasets**
-  - **CIC-IDS-2017**: Current dataset
-  - **CSE-CIC-IDS-2018**: Includes more attack types
-  - **UNSW-NB15**: Different network characteristics
-  - **CTU-13**: Botnet-focused dataset
-  
-- [ ] **Ensemble Learning**
-  - Implement voting ensemble (RF + LightGBM + XGBoost)
-  - Weighted average based on confidence scores
-  - Test adaptive ensemble from `utils/adaptive_ensemble_predictor.py`
-  
-- [ ] **Online Learning**
-  - Implement incremental learning
-  - Update models with new labeled data
-  - Handle concept drift (evolving attack patterns)
-  
-- [ ] **Model Versioning**
-  - MLflow integration for experiment tracking
-  - Model registry for version control
-  - A/B testing framework
+#### 4.1 Ensemble Model Optimization
 
-#### Feature Engineering
-- [ ] **Deep Packet Inspection Features**
-  - Extract application-layer features
-  - Parse HTTP headers, DNS queries, TLS handshakes
-  - Add payload entropy calculations
-  
-- [ ] **Temporal Features**
-  - Time-window aggregations (5-min, 1-hour windows)
-  - Sequence-based features (LSTM inputs)
-  - Periodic behavior detection
-  
-- [ ] **Graph-based Features**
-  - Network topology features
-  - Community detection
-  - PageRank-style metrics
+- [ ] **Implement Robust Ensemble**
+  - [ ] Voting ensemble (RF + LightGBM + XGBoost)
+  - [ ] Weighted average based on historical confidence scores
+  - [ ] Optimize `utils/adaptive_ensemble_predictor.py`
+  - [ ] Test different voting strategies (hard, soft, weighted)
+  - [ ] Measure ensemble improvement over single models
+
+- [ ] **Confidence Calibration**
+  - [ ] Analyze confidence score distributions
+  - [ ] Implement confidence calibration (Platt scaling, isotonic regression)
+  - [ ] Set optimal confidence thresholds per attack type
+  - [ ] Reduce false positives with calibrated scores
+
+- [ ] **Ensemble Performance Testing**
+  - [ ] Compare ensemble vs individual models on test set
+  - [ ] Measure improvement in accuracy, precision, recall
+  - [ ] Test on edge cases and rare attacks
+  - [ ] Document when ensemble performs better/worse
+
+#### 4.2 Online Learning Implementation
+
+- [ ] **Incremental Learning System**
+  - [ ] Implement online learning for Random Forest
+  - [ ] Implement online learning for LightGBM
+  - [ ] Create feedback loop for model updates
+  - [ ] Handle concept drift (evolving attack patterns)
+
+- [ ] **Active Learning Pipeline**
+  - [ ] Identify uncertain predictions (low confidence)
+  - [ ] Queue samples for manual labeling
+  - [ ] Retrain models with new labeled data
+  - [ ] Track model performance over time
+
+- [ ] **Model Update Strategy**
+  - [ ] Define update frequency (daily, weekly)
+  - [ ] Implement A/B testing for new models
+  - [ ] Version control for models (MLflow)
+  - [ ] Rollback strategy if performance degrades
+
+#### 4.3 Feature Engineering for CICIDS Datasets
+
+**Goal:** Optimize features specifically for CICIDS2017/2018 datasets
+
+- [ ] **Feature Analysis**
+  - [ ] Analyze feature importance for RF and LightGBM models
+  - [ ] Identify redundant/correlated features
+  - [ ] Test feature selection algorithms (RFE, mutual information)
+  - [ ] Document most important features per attack type
+
+- [ ] **Feature Optimization**
+  - [ ] Remove low-importance features (< 0.01 importance)
+  - [ ] Create new derived features from existing ones
+  - [ ] Test polynomial features for non-linear relationships
+  - [ ] Optimize feature extraction performance
+
+- [ ] **CICIDS-Specific Features**
+  - [ ] Verify all 65 CICIDS2017 features are extracted correctly
+  - [ ] Add missing features if any
+  - [ ] Handle missing/null values properly
+  - [ ] Normalize/standardize features correctly
+
+- [ ] **Cross-Dataset Testing**
+  - [ ] Test CICIDS2017 model on CICIDS2018 data
+  - [ ] Test CICIDS2018 model on CICIDS2017 data
+  - [ ] Measure generalization performance
+  - [ ] Identify dataset-specific biases
+
+**Note:** Focus on improving current models with CICIDS datasets. Advanced techniques (deep learning, graph features, etc.) moved to medium-term goals.
 
 ### 5. 🔐 Detection Capabilities
 
