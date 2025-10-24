@@ -100,10 +100,15 @@ class MLEnhancedKafkaConsumer:
             'start_time': None,
         }
         
-        # Flow tracking for correlation
-        # Maps flow_id -> {'alert': alert_event, 'flow': flow_event}
-        self.flow_cache = {}
-        self.flow_cache_max_size = 10000
+        # Performance metrics
+        self.performance_metrics = {
+            'inference_times': [],  # Track ML inference latency
+            'feature_extraction_times': [],  # Track feature extraction time
+            'total_processing_times': [],  # Track end-to-end processing time
+            'predictions_by_class': {},  # Count predictions per class
+            'confidence_scores': [],  # Track confidence distribution
+            'batch_sizes': [],  # Track batch processing sizes
+        }
         
         # Event processing queue
         self.event_queue = deque(maxlen=1000)
@@ -286,10 +291,15 @@ class MLEnhancedKafkaConsumer:
         This is the main processing path for all network flows.
         """
         try:
+            processing_start = time.time()
             self.stats['flows_processed'] += 1
             
-            # Extract CICIDS2017 features
+            # Extract CICIDS2017 features (measure time)
+            feature_start = time.time()
             features = self.feature_extractor.extract_from_flow(flow_event)
+            feature_time = time.time() - feature_start
+            self.performance_metrics['feature_extraction_times'].append(feature_time)
+            
             if not features:
                 logger.debug("Feature extraction failed for flow")
                 return
@@ -297,13 +307,24 @@ class MLEnhancedKafkaConsumer:
             # Map 65 features to 34 features for model compatibility
             feature_array = self.feature_mapper.map_to_34(features)
             
-            # ML prediction with confidence
+            # ML prediction with confidence (measure time)
+            inference_start = time.time()
             predictions = self.model_loader.predict(feature_array)
             probabilities = self.model_loader.predict_proba(feature_array)
+            inference_time = time.time() - inference_start
+            self.performance_metrics['inference_times'].append(inference_time)
             
             prediction = predictions[0] if len(predictions) > 0 else 'BENIGN'
             confidence = float(np.max(probabilities[0])) if len(probabilities) > 0 else 0.0
             self.stats['ml_predictions'] += 1
+            
+            # Track prediction distribution
+            if prediction not in self.performance_metrics['predictions_by_class']:
+                self.performance_metrics['predictions_by_class'][prediction] = 0
+            self.performance_metrics['predictions_by_class'][prediction] += 1
+            
+            # Track confidence scores
+            self.performance_metrics['confidence_scores'].append(confidence)
             
             if prediction and prediction != 'BENIGN':
                 logger.info(
@@ -312,29 +333,22 @@ class MLEnhancedKafkaConsumer:
                     f"{flow_event.get('dest_ip')}:{flow_event.get('dest_port')}"
                 )
             
-            # Check if we have a correlated Suricata alert for this flow
-            flow_id = flow_event.get('flow_id')
-            suricata_alert = None
-            if flow_id and flow_id in self.flow_cache:
-                cached = self.flow_cache[flow_id]
-                suricata_alert = cached.get('alert')
-            
-            # Process combined alert
+            # Process ML alert (no correlation with Suricata alerts)
             enhanced_alert = self.alert_processor.process_flow_with_ml(
                 flow_event,
                 ml_prediction=prediction,
                 ml_confidence=confidence,
-                suricata_alert=suricata_alert
+                suricata_alert=None
             )
             
             # Send enhanced alert to Kafka if generated
             if enhanced_alert:
                 self._send_to_kafka(enhanced_alert)
                 self.stats['ml_alerts_generated'] += 1
-                
-                # Remove from cache if correlated
-                if flow_id and flow_id in self.flow_cache:
-                    del self.flow_cache[flow_id]
+            
+            # Track total processing time
+            total_time = time.time() - processing_start
+            self.performance_metrics['total_processing_times'].append(total_time)
         
         except Exception as e:
             logger.error(f"Error processing flow event: {e}", exc_info=True)
@@ -344,51 +358,22 @@ class MLEnhancedKafkaConsumer:
         """
         Process a Suricata alert event.
         
-        Cache the alert and wait for corresponding flow event for correlation.
+        Forward Suricata alerts directly without correlation.
         """
         try:
             self.stats['alerts_processed'] += 1
             
-            # Extract flow ID for correlation
-            flow_id = alert_event.get('flow_id')
-            if not flow_id:
-                logger.debug("Alert without flow_id - processing independently")
-                # Process alert without flow correlation
-                enhanced_alert = self.alert_processor.process_flow_with_ml(
-                    alert_event,
-                    suricata_alert=alert_event
-                )
-                if enhanced_alert:
-                    self._send_to_kafka(enhanced_alert)
-                return
-            
-            # Cache alert for flow correlation
-            if flow_id not in self.flow_cache:
-                self.flow_cache[flow_id] = {}
-            self.flow_cache[flow_id]['alert'] = alert_event
-            self.flow_cache[flow_id]['timestamp'] = time.time()
-            
-            # Cleanup old cache entries
-            self._cleanup_flow_cache()
+            # Process and forward Suricata alert
+            enhanced_alert = self.alert_processor.process_flow_with_ml(
+                alert_event,
+                suricata_alert=alert_event
+            )
+            if enhanced_alert:
+                self._send_to_kafka(enhanced_alert)
         
         except Exception as e:
             logger.error(f"Error processing alert event: {e}", exc_info=True)
             self.stats['errors'] += 1
-    
-    def _cleanup_flow_cache(self):
-        """Remove old entries from flow cache."""
-        if len(self.flow_cache) > self.flow_cache_max_size:
-            # Remove oldest 10%
-            timeout = self.config['flow_correlation_timeout']
-            current_time = time.time()
-            
-            to_remove = []
-            for flow_id, data in self.flow_cache.items():
-                if current_time - data.get('timestamp', 0) > timeout:
-                    to_remove.append(flow_id)
-            
-            for flow_id in to_remove:
-                del self.flow_cache[flow_id]
     
     def _send_to_kafka(self, alert: Dict):
         """Send enhanced alert to Kafka output topic."""
@@ -403,29 +388,162 @@ class MLEnhancedKafkaConsumer:
             self.stats['errors'] += 1
     
     def _print_stats(self):
-        """Print processing statistics."""
+        """Print comprehensive processing statistics and performance metrics."""
         runtime = time.time() - self.stats['start_time']
         
-        print(f"\n{Colors.BOLD}{Colors.CYAN}═══ Statistics ({runtime:.0f}s) ═══{Colors.END}")
-        print(f"  Events processed: {self.stats['events_processed']}")
-        print(f"  Flows processed: {self.stats['flows_processed']}")
-        print(f"  Alerts processed: {self.stats['alerts_processed']}")
-        print(f"  ML predictions: {self.stats['ml_predictions']}")
-        print(f"  ML alerts: {self.stats['ml_alerts_generated']}")
-        print(f"  Enhanced alerts sent: {self.stats['enhanced_alerts_sent']}")
-        print(f"  Errors: {self.stats['errors']}")
-        print(f"  Events/sec: {self.stats['events_processed']/runtime:.2f}")
+        print(f"\n{Colors.BOLD}{Colors.CYAN}╔════════════════════════════════════════════════════════════════╗{Colors.END}")
+        print(f"{Colors.BOLD}{Colors.CYAN}║         ML IDS Performance Metrics ({runtime:.0f}s runtime)            ║{Colors.END}")
+        print(f"{Colors.BOLD}{Colors.CYAN}╚════════════════════════════════════════════════════════════════╝{Colors.END}\n")
         
-        # Alert processor stats
-        ap_stats = self.alert_processor.get_statistics()
-        print(f"  Suricata alerts: {ap_stats['suricata_alerts']}")
-        print(f"  Combined alerts: {ap_stats['combined_alerts']}")
+        # === THROUGHPUT METRICS ===
+        print(f"{Colors.BOLD}{Colors.BLUE}📊 THROUGHPUT METRICS{Colors.END}")
+        print(f"  Events processed:      {self.stats['events_processed']:,}")
+        print(f"  Flows processed:       {self.stats['flows_processed']:,}")
+        print(f"  Alerts processed:      {self.stats['alerts_processed']:,}")
+        print(f"  ML predictions:        {self.stats['ml_predictions']:,}")
+        print(f"  ML alerts generated:   {self.stats['ml_alerts_generated']:,}")
+        print(f"  Enhanced alerts sent:  {self.stats['enhanced_alerts_sent']:,}")
+        if runtime > 0:
+            print(f"  Events/sec:            {self.stats['events_processed']/runtime:.2f}")
+            print(f"  Flows/sec:             {self.stats['flows_processed']/runtime:.2f}")
+            print(f"  Predictions/sec:       {self.stats['ml_predictions']/runtime:.2f}")
         print()
+        
+        # === LATENCY METRICS ===
+        print(f"{Colors.BOLD}{Colors.MAGENTA}⚡ LATENCY METRICS{Colors.END}")
+        if self.performance_metrics['inference_times']:
+            inf_times = np.array(self.performance_metrics['inference_times']) * 1000  # Convert to ms
+            print(f"  ML Inference Latency:")
+            print(f"    Average:   {np.mean(inf_times):.3f} ms")
+            print(f"    Median:    {np.median(inf_times):.3f} ms")
+            print(f"    Min:       {np.min(inf_times):.3f} ms")
+            print(f"    Max:       {np.max(inf_times):.3f} ms")
+            print(f"    P95:       {np.percentile(inf_times, 95):.3f} ms")
+            print(f"    P99:       {np.percentile(inf_times, 99):.3f} ms")
+        
+        if self.performance_metrics['feature_extraction_times']:
+            feat_times = np.array(self.performance_metrics['feature_extraction_times']) * 1000
+            print(f"  Feature Extraction Latency:")
+            print(f"    Average:   {np.mean(feat_times):.3f} ms")
+            print(f"    Median:    {np.median(feat_times):.3f} ms")
+        
+        if self.performance_metrics['total_processing_times']:
+            total_times = np.array(self.performance_metrics['total_processing_times']) * 1000
+            print(f"  Total Processing Latency:")
+            print(f"    Average:   {np.mean(total_times):.3f} ms")
+            print(f"    Median:    {np.median(total_times):.3f} ms")
+            print(f"    P95:       {np.percentile(total_times, 95):.3f} ms")
+            print(f"    P99:       {np.percentile(total_times, 99):.3f} ms")
+        print()
+        
+        # === PREDICTION DISTRIBUTION ===
+        print(f"{Colors.BOLD}{Colors.YELLOW}🎯 PREDICTION DISTRIBUTION{Colors.END}")
+        if self.performance_metrics['predictions_by_class']:
+            total_preds = sum(self.performance_metrics['predictions_by_class'].values())
+            for pred_class, count in sorted(self.performance_metrics['predictions_by_class'].items(), 
+                                           key=lambda x: x[1], reverse=True):
+                percentage = (count / total_preds * 100) if total_preds > 0 else 0
+                bar_length = int(percentage / 2)  # Scale to 50 chars max
+                bar = "█" * bar_length
+                print(f"  {pred_class:<20s} {count:>6,} ({percentage:>5.1f}%) {bar}")
+        print()
+        
+        # === CONFIDENCE DISTRIBUTION ===
+        print(f"{Colors.BOLD}{Colors.CYAN}📈 CONFIDENCE DISTRIBUTION{Colors.END}")
+        if self.performance_metrics['confidence_scores']:
+            conf_scores = np.array(self.performance_metrics['confidence_scores'])
+            print(f"  Average Confidence:    {np.mean(conf_scores):.2%}")
+            print(f"  Median Confidence:     {np.median(conf_scores):.2%}")
+            print(f"  Min Confidence:        {np.min(conf_scores):.2%}")
+            print(f"  Max Confidence:        {np.max(conf_scores):.2%}")
+            print(f"  Std Deviation:         {np.std(conf_scores):.2%}")
+            
+            # Confidence ranges
+            high_conf = np.sum(conf_scores >= 0.9)
+            med_conf = np.sum((conf_scores >= 0.7) & (conf_scores < 0.9))
+            low_conf = np.sum(conf_scores < 0.7)
+            print(f"  High confidence (≥90%): {high_conf:,}")
+            print(f"  Med confidence (70-90%): {med_conf:,}")
+            print(f"  Low confidence (<70%):  {low_conf:,}")
+        print()
+        
+        # === MODEL INFO ===
+        print(f"{Colors.BOLD}{Colors.MAGENTA}🤖 MODEL INFORMATION{Colors.END}")
+        model_info = self.model_loader.get_model_info()
+        print(f"  Model Name:            {self.config.get('ml_model_name', 'Unknown')}")
+        print(f"  Model Type:            {model_info.get('model_type', 'Unknown')}")
+        print(f"  Expected Features:     {model_info.get('expected_features', 'Unknown')}")
+        print()
+        
+        # === ALERT PROCESSOR STATS ===
+        ap_stats = self.alert_processor.get_statistics()
+        print(f"{Colors.BOLD}{Colors.RED}🚨 ALERT STATISTICS{Colors.END}")
+        print(f"  Suricata alerts:       {ap_stats['suricata_alerts']:,}")
+        print(f"  Combined alerts:       {ap_stats['combined_alerts']:,}")
+        print(f"  Errors:                {self.stats['errors']:,}")
+        print()
+        
+        print(f"{Colors.BOLD}{Colors.GREEN}{'─' * 64}{Colors.END}\n")
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}")
         self.running = False
+    
+    def save_metrics_to_file(self):
+        """Save performance metrics to JSON file for later analysis."""
+        try:
+            metrics_file = LOG_DIR / f'performance_metrics_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+            
+            # Calculate summary metrics
+            runtime = time.time() - self.stats['start_time'] if self.stats['start_time'] else 0
+            
+            metrics_summary = {
+                'timestamp': datetime.now().isoformat(),
+                'runtime_seconds': runtime,
+                'model_name': self.config.get('ml_model_name', 'Unknown'),
+                'model_type': self.model_loader.get_model_info().get('model_type', 'Unknown'),
+                'throughput': {
+                    'events_processed': self.stats['events_processed'],
+                    'flows_processed': self.stats['flows_processed'],
+                    'alerts_processed': self.stats['alerts_processed'],
+                    'ml_predictions': self.stats['ml_predictions'],
+                    'events_per_sec': self.stats['events_processed'] / runtime if runtime > 0 else 0,
+                    'predictions_per_sec': self.stats['ml_predictions'] / runtime if runtime > 0 else 0,
+                },
+                'latency_ms': {
+                    'inference': {
+                        'mean': float(np.mean(self.performance_metrics['inference_times']) * 1000) if self.performance_metrics['inference_times'] else 0,
+                        'median': float(np.median(self.performance_metrics['inference_times']) * 1000) if self.performance_metrics['inference_times'] else 0,
+                        'p95': float(np.percentile(self.performance_metrics['inference_times'], 95) * 1000) if self.performance_metrics['inference_times'] else 0,
+                        'p99': float(np.percentile(self.performance_metrics['inference_times'], 99) * 1000) if self.performance_metrics['inference_times'] else 0,
+                    },
+                    'feature_extraction': {
+                        'mean': float(np.mean(self.performance_metrics['feature_extraction_times']) * 1000) if self.performance_metrics['feature_extraction_times'] else 0,
+                    },
+                    'total_processing': {
+                        'mean': float(np.mean(self.performance_metrics['total_processing_times']) * 1000) if self.performance_metrics['total_processing_times'] else 0,
+                        'p95': float(np.percentile(self.performance_metrics['total_processing_times'], 95) * 1000) if self.performance_metrics['total_processing_times'] else 0,
+                    }
+                },
+                'predictions_by_class': self.performance_metrics['predictions_by_class'],
+                'confidence_stats': {
+                    'mean': float(np.mean(self.performance_metrics['confidence_scores'])) if self.performance_metrics['confidence_scores'] else 0,
+                    'median': float(np.median(self.performance_metrics['confidence_scores'])) if self.performance_metrics['confidence_scores'] else 0,
+                    'std': float(np.std(self.performance_metrics['confidence_scores'])) if self.performance_metrics['confidence_scores'] else 0,
+                },
+                'errors': self.stats['errors']
+            }
+            
+            # Save to file
+            with open(metrics_file, 'w') as f:
+                json.dump(metrics_summary, f, indent=2)
+            
+            print(f"{Colors.GREEN}✓ Performance metrics saved to: {metrics_file}{Colors.END}")
+            logger.info(f"Performance metrics saved to {metrics_file}")
+            
+        except Exception as e:
+            logger.error(f"Error saving metrics to file: {e}", exc_info=True)
     
     def stop(self):
         """Stop the consumer and cleanup."""
@@ -434,6 +552,9 @@ class MLEnhancedKafkaConsumer:
         
         # Print final stats
         self._print_stats()
+        
+        # Save metrics to file
+        self.save_metrics_to_file()
         
         # Close Kafka connections
         if self.consumer:

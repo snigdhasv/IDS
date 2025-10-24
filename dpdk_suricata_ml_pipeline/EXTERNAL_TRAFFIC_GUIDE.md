@@ -60,11 +60,17 @@ sudo ./quick_start.sh
 **For Linux/Mac:**
 ```bash
 # On the external device (e.g., Kali Linux, Raspberry Pi, etc.)
+# IMPORTANT: Replace eth0 with YOUR interface name (find it with: ip link show)
+# Common names: eth0, enp2s0, enp3s0, eno1, ens33
+
+# Find your interface first:
+ip link show
+
+# Then configure it (replace eth0 with your interface name):
 sudo ip addr add 192.168.100.2/24 dev eth0
 sudo ip link set eth0 up
-sudo ip route add default via 192.168.100.1
 
-# Test connectivity
+# Test connectivity (NO need for default route in most cases)
 ping 192.168.100.1
 ```
 
@@ -82,6 +88,8 @@ ping 192.168.100.1
 ### Step 4: Replay Traffic from External Device
 ```bash
 # On the external device
+# IMPORTANT: Replace eth0 with YOUR interface name (e.g., enp2s0, enp3s0, eno1, ens33)
+
 # Option A: tcpreplay (best for PCAPs)
 sudo tcpreplay -i eth0 -K --mbps 10 attack_traffic.pcap
 
@@ -166,13 +174,18 @@ ip addr show enx00e04c36074c
 **Method 1: Static IP (Recommended)**
 ```bash
 # On external device
-sudo ip addr flush dev eth0
-sudo ip addr add 192.168.100.2/24 dev eth0
-sudo ip link set eth0 up
-sudo ip route add default via 192.168.100.1
+# IMPORTANT: Replace eth0 with YOUR actual interface name!
+# Find it first: ip link show
+# Common names: eth0, enp2s0, enp3s0, eno1, ens33
+
+INTERFACE="eth0"  # ← CHANGE THIS to your interface (e.g., enp2s0)
+
+sudo ip addr flush dev $INTERFACE
+sudo ip addr add 192.168.100.2/24 dev $INTERFACE
+sudo ip link set $INTERFACE up
 
 # Verify
-ip addr show eth0
+ip addr show $INTERFACE
 ping 192.168.100.1
 ```
 
@@ -569,15 +582,20 @@ tail -f logs/ml/consumer.log
 
 ### External Device (Attack Generator)
 ```bash
+# IMPORTANT: Replace eth0 with YOUR interface name (check with: ip link show)
+# Example: enp2s0, enp3s0, eno1, ens33, etc.
+
+INTERFACE="eth0"  # ← CHANGE THIS (e.g., INTERFACE="enp2s0")
+
 # Configure network
-sudo ip addr add 192.168.100.2/24 dev eth0
-sudo ip link set eth0 up
+sudo ip addr add 192.168.100.2/24 dev $INTERFACE
+sudo ip link set $INTERFACE up
 
 # Test connectivity
 ping 192.168.100.1
 
 # Replay attack traffic
-sudo tcpreplay -i eth0 -K --mbps 10 /path/to/attack.pcap
+sudo tcpreplay -i $INTERFACE -K --mbps 10 /path/to/attack.pcap
 
 # Watch your IDS system detect the attacks!
 ```
