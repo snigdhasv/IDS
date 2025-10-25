@@ -97,6 +97,50 @@ echo -e "\n${BOLD}${GREEN}Interface Configuration:${NC}"
 ip addr show "$CAPTURE_INTERFACE"
 echo
 
+# Check firewall rules
+echo -e "\n${BLUE}Step 7: Checking firewall configuration...${NC}"
+
+# Check if ufw is active
+if command -v ufw &> /dev/null; then
+    UFW_STATUS=$(ufw status 2>/dev/null | grep -i "Status:" | awk '{print $2}')
+    if [ "$UFW_STATUS" = "active" ]; then
+        echo -e "${YELLOW}⚠️  UFW firewall is active${NC}"
+        echo -e "${YELLOW}   Traffic on $CAPTURE_INTERFACE may be blocked${NC}"
+        echo -e "${CYAN}   To allow traffic: sudo ufw allow in on $CAPTURE_INTERFACE${NC}"
+        
+        # Check if rule already exists
+        if ufw status | grep -q "$CAPTURE_INTERFACE"; then
+            echo -e "${GREEN}✓ UFW rule for $CAPTURE_INTERFACE already exists${NC}"
+        else
+            read -p "Add UFW rule to allow traffic on $CAPTURE_INTERFACE? (y/n): " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                ufw allow in on "$CAPTURE_INTERFACE"
+                echo -e "${GREEN}✓ UFW rule added${NC}"
+            else
+                echo -e "${YELLOW}⚠️  Skipped UFW rule - you may need to add it manually${NC}"
+            fi
+        fi
+    else
+        echo -e "${GREEN}✓ UFW firewall is inactive${NC}"
+    fi
+else
+    echo -e "${CYAN}ℹ  UFW not installed${NC}"
+fi
+
+# Check iptables rules
+if command -v iptables &> /dev/null; then
+    INPUT_RULES=$(iptables -L INPUT -n 2>/dev/null | grep -v "^Chain\|^target" | wc -l)
+    if [ "$INPUT_RULES" -gt 0 ]; then
+        echo -e "${YELLOW}⚠️  iptables has $INPUT_RULES INPUT rules configured${NC}"
+        echo -e "${CYAN}   Check if they block traffic: sudo iptables -L INPUT -v -n${NC}"
+    else
+        echo -e "${GREEN}✓ No restrictive iptables INPUT rules${NC}"
+    fi
+else
+    echo -e "${CYAN}ℹ  iptables not available${NC}"
+fi
+
 echo -e "\n${BOLD}${GREEN}╔════════════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}${GREEN}║  Interface Ready for External Traffic          ║${NC}"
 echo -e "${BOLD}${GREEN}╚════════════════════════════════════════════════╝${NC}"
