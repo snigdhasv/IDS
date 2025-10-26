@@ -262,8 +262,8 @@ start_kafka_bridge() {
         echo -e "${YELLOW}⚠️  Kafka bridge already running${NC}"
         return 0
     fi
-    
-    bash "${PIPELINE_SCRIPTS}/06_start_kafka_bridge.sh"
+
+    bash "${PIPELINE_SCRIPTS}/04_start_kafka_bridge.sh"
     sleep 2
     
     if pgrep -f "suricata_kafka_bridge.py" > /dev/null; then
@@ -282,7 +282,7 @@ start_ml_consumer() {
         return 0
     fi
     
-    bash "${PIPELINE_SCRIPTS}/04_start_ml_consumer.sh" &
+    bash "${PIPELINE_SCRIPTS}/05_start_ml_consumer.sh" &
     sleep 3
     
     if pgrep -f "ml_kafka_consumer.py" > /dev/null; then
