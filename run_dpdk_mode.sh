@@ -293,6 +293,17 @@ start_ml_consumer() {
     fi
 }
 
+start_two_model_ensemble() {
+    echo -e "\n${BOLD}${CYAN}═══ Starting Two-Model Ensemble Consumer ═══${NC}"
+    
+    if pgrep -f "two_model_consumer.py" > /dev/null; then
+        echo -e "${YELLOW}⚠️  Two-model ensemble already running${NC}"
+        return 0
+    fi
+    
+    bash "${PIPELINE_SCRIPTS}/06_start_two_model_consumer.sh"
+}
+
 show_status() {
     echo -e "\n${BOLD}${CYAN}═══ System Status ═══${NC}\n"
     
@@ -339,9 +350,18 @@ show_status() {
     fi
     
     # ML consumer status
+    local ml_running=false
     if pgrep -f "ml_kafka_consumer.py" > /dev/null; then
-        echo -e "${GREEN}✓ ML Consumer:${NC} Running"
-    else
+        echo -e "${GREEN}✓ ML Consumer (Single Model):${NC} Running"
+        ml_running=true
+    fi
+    
+    if pgrep -f "two_model_consumer.py" > /dev/null; then
+        echo -e "${GREEN}✓ ML Consumer (Two-Model Ensemble):${NC} Running"
+        ml_running=true
+    fi
+    
+    if [ "$ml_running" = false ]; then
         echo -e "${RED}✗ ML Consumer:${NC} Not running"
     fi
 }
@@ -349,23 +369,51 @@ show_status() {
 stop_all() {
     echo -e "\n${BOLD}${CYAN}═══ Stopping All Services ═══${NC}\n"
     
-    # Stop ML consumer
+    # Stop ML consumers (both single and ensemble)
     if pgrep -f "ml_kafka_consumer.py" > /dev/null; then
-        echo -e "${BLUE}Stopping ML consumer...${NC}"
-        pkill -f "ml_kafka_consumer.py" && echo -e "${GREEN}✓ ML consumer stopped${NC}"
+        echo -e "${BLUE}Stopping single model ML consumer...${NC}"
+        pkill -9 -f "ml_kafka_consumer.py"
+        sleep 1
+        if ! pgrep -f "ml_kafka_consumer.py" > /dev/null; then
+            echo -e "${GREEN}✓ Single model consumer stopped${NC}"
+        else
+            echo -e "${RED}⚠ Failed to stop single model consumer${NC}"
+        fi
+    fi
+    
+    if pgrep -f "two_model_consumer.py" > /dev/null; then
+        echo -e "${BLUE}Stopping two-model ensemble consumer...${NC}"
+        pkill -9 -f "two_model_consumer.py"
+        sleep 1
+        if ! pgrep -f "two_model_consumer.py" > /dev/null; then
+            echo -e "${GREEN}✓ Two-model ensemble stopped${NC}"
+        else
+            echo -e "${RED}⚠ Failed to stop ensemble consumer${NC}"
+        fi
     fi
     
     # Stop Kafka bridge
     if pgrep -f "suricata_kafka_bridge.py" > /dev/null; then
         echo -e "${BLUE}Stopping Kafka bridge...${NC}"
-        pkill -f "suricata_kafka_bridge.py" && echo -e "${GREEN}✓ Kafka bridge stopped${NC}"
+        pkill -9 -f "suricata_kafka_bridge.py"
+        sleep 1
+        if ! pgrep -f "suricata_kafka_bridge.py" > /dev/null; then
+            echo -e "${GREEN}✓ Kafka bridge stopped${NC}"
+        else
+            echo -e "${RED}⚠ Failed to stop Kafka bridge${NC}"
+        fi
     fi
     
     # Stop Suricata
     if pgrep suricata > /dev/null; then
         echo -e "${BLUE}Stopping Suricata...${NC}"
-        pkill suricata && echo -e "${GREEN}✓ Suricata stopped${NC}"
+        pkill suricata
         sleep 2
+        if ! pgrep suricata > /dev/null; then
+            echo -e "${GREEN}✓ Suricata stopped${NC}"
+        else
+            echo -e "${RED}⚠ Failed to stop Suricata${NC}"
+        fi
     fi
     
     # Stop Kafka
@@ -402,14 +450,46 @@ view_logs() {
             tail -f /var/log/suricata/suricata.log 2>/dev/null || echo -e "${RED}Log file not found${NC}"
             ;;
         2)
-            tail -f "${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/logs/ml/ml_consumer.log" 2>/dev/null || echo -e "${RED}Log file not found${NC}"
+            # Detect which consumer is running
+            if pgrep -f "two_model_consumer.py" > /dev/null; then
+                echo -e "${CYAN}Showing Two-Model Ensemble logs...${NC}"
+                tail -f "${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/logs/ml/two_model_ensemble.log" 2>/dev/null || echo -e "${RED}Log file not found${NC}"
+            elif pgrep -f "ml_kafka_consumer.py" > /dev/null; then
+                echo -e "${CYAN}Showing Single Model Consumer logs...${NC}"
+                tail -f "${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/logs/ml/ml_consumer.log" 2>/dev/null || echo -e "${RED}Log file not found${NC}"
+            else
+                # No consumer running, check which log file exists and is newer
+                ENSEMBLE_LOG="${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/logs/ml/two_model_ensemble.log"
+                SINGLE_LOG="${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/logs/ml/ml_consumer.log"
+                
+                if [ -f "$ENSEMBLE_LOG" ] && [ -f "$SINGLE_LOG" ]; then
+                    # Show the most recently modified log
+                    if [ "$ENSEMBLE_LOG" -nt "$SINGLE_LOG" ]; then
+                        echo -e "${CYAN}Showing most recent log (Two-Model Ensemble)...${NC}"
+                        tail -f "$ENSEMBLE_LOG"
+                    else
+                        echo -e "${CYAN}Showing most recent log (Single Model)...${NC}"
+                        tail -f "$SINGLE_LOG"
+                    fi
+                elif [ -f "$ENSEMBLE_LOG" ]; then
+                    echo -e "${CYAN}Showing Two-Model Ensemble logs...${NC}"
+                    tail -f "$ENSEMBLE_LOG"
+                elif [ -f "$SINGLE_LOG" ]; then
+                    echo -e "${CYAN}Showing Single Model Consumer logs...${NC}"
+                    tail -f "$SINGLE_LOG"
+                else
+                    echo -e "${RED}No ML consumer log files found${NC}"
+                fi
+            fi
             ;;
         3)
             tail -f "${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/logs/kafka_bridge.log" 2>/dev/null || echo -e "${RED}Log file not found${NC}"
             ;;
         4)
+            # Include both consumer logs in "all logs"
             tail -f /var/log/suricata/suricata.log \
                     "${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/logs/ml/ml_consumer.log" \
+                    "${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/logs/ml/two_model_ensemble.log" \
                     "${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/logs/kafka_bridge.log" 2>/dev/null || echo -e "${RED}Some log files not found${NC}"
             ;;
         *)
@@ -477,10 +557,11 @@ show_menu() {
     echo -e "  ${GREEN}6${NC}) Bind Interface to DPDK"
     echo -e "  ${GREEN}7${NC}) Unbind Interface from DPDK"
     echo -e "  ${GREEN}8${NC}) Monitor Metrics 📊"
-    echo -e "  ${GREEN}9${NC}) Check Status"
-    echo -e "  ${GREEN}10${NC}) View Logs"
-    echo -e "  ${GREEN}11${NC}) Show DPDK Info"
-    echo -e "  ${GREEN}12${NC}) Stop All Services"
+    echo -e "  ${GREEN}9${NC}) Start Two-Model Ensemble 🎯"
+    echo -e "  ${GREEN}10${NC}) Check Status"
+    echo -e "  ${GREEN}11${NC}) View Logs"
+    echo -e "  ${GREEN}12${NC}) Show DPDK Info"
+    echo -e "  ${GREEN}13${NC}) Stop All Services"
     echo -e "  ${RED}0${NC}) Exit"
     echo -e "${BOLD}${MAGENTA}═══════════════════════════════════════════${NC}\n"
 }
@@ -505,7 +586,32 @@ main() {
                 start_kafka
                 start_suricata
                 start_kafka_bridge
-                start_ml_consumer
+                
+                # Ask which ML consumer to use (if running interactively)
+                if [ -t 0 ]; then
+                    echo -e "\n${BOLD}${CYAN}═══ Select ML Consumer ═══${NC}"
+                    echo -e "  ${GREEN}1${NC}) Single Model (faster, simpler)"
+                    echo -e "  ${GREEN}2${NC}) Two-Model Ensemble (more accurate, meta-learner)"
+                    echo
+                    read -p "Enter choice [1-2]: " ml_choice
+                    
+                    case $ml_choice in
+                        1)
+                            start_ml_consumer
+                            ;;
+                        2)
+                            start_two_model_ensemble
+                            ;;
+                        *)
+                            echo -e "${YELLOW}Invalid choice, defaulting to single model${NC}"
+                            start_ml_consumer
+                            ;;
+                    esac
+                else
+                    # Non-interactive, default to single model
+                    start_ml_consumer
+                fi
+                
                 echo -e "\n${GREEN}${BOLD}✓ Complete pipeline started!${NC}"
                 show_status
                 ;;
@@ -530,16 +636,19 @@ main() {
             metrics|8)
                 monitor_metrics
                 ;;
-            status|9)
+            ensemble|9)
+                start_two_model_ensemble
+                ;;
+            status|10)
                 show_status
                 ;;
-            logs|10)
+            logs|11)
                 view_logs
                 ;;
-            info|11)
+            info|12)
                 show_dpdk_info
                 ;;
-            stop|12)
+            stop|13)
                 stop_all
                 ;;
             *)
@@ -553,7 +662,7 @@ main() {
     # Interactive menu
     while true; do
         show_menu
-        read -p "Enter choice [0-12]: " choice
+        read -p "Enter choice [0-13]: " choice
         
         case $choice in
             1)
@@ -561,7 +670,27 @@ main() {
                 start_kafka
                 start_suricata
                 start_kafka_bridge
-                start_ml_consumer
+                
+                # Ask which ML consumer to use
+                echo -e "\n${BOLD}${CYAN}═══ Select ML Consumer ═══${NC}"
+                echo -e "  ${GREEN}1${NC}) Single Model (faster, simpler)"
+                echo -e "  ${GREEN}2${NC}) Two-Model Ensemble (more accurate, meta-learner)"
+                echo
+                read -p "Enter choice [1-2]: " ml_choice
+                
+                case $ml_choice in
+                    1)
+                        start_ml_consumer
+                        ;;
+                    2)
+                        start_two_model_ensemble
+                        ;;
+                    *)
+                        echo -e "${YELLOW}Invalid choice, defaulting to single model${NC}"
+                        start_ml_consumer
+                        ;;
+                esac
+                
                 echo -e "\n${GREEN}${BOLD}✓ Complete pipeline started!${NC}"
                 show_status
                 ;;
@@ -587,15 +716,18 @@ main() {
                 monitor_metrics
                 ;;
             9)
-                show_status
+                start_two_model_ensemble
                 ;;
             10)
-                view_logs
+                show_status
                 ;;
             11)
-                show_dpdk_info
+                view_logs
                 ;;
             12)
+                show_dpdk_info
+                ;;
+            13)
                 stop_all
                 ;;
             0)
@@ -603,7 +735,7 @@ main() {
                 exit 0
                 ;;
             *)
-                echo -e "${RED}Invalid choice. Please enter 0-12${NC}"
+                echo -e "${RED}Invalid choice. Please enter 0-13${NC}"
                 ;;
         esac
         

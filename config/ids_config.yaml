@@ -31,9 +31,17 @@ suricata:
 kafka:
   bootstrap_servers: "localhost:9092"
   topic_prefix: "ids"
+  input_topic: "suricata-events"
+  output_topic: "enhanced-alerts"
+  group_id: "ml-consumer"
   batch_size: 16384
   linger_ms: 5
   compression_type: "gzip"
+
+ml:
+  prediction_threshold: 0.7
+  batch_size: 10
+  model_dir: "/home/sujay/Programming/IDS/ML Models"
 
 # System paths
 install_dir: "/opt/ids"

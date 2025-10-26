@@ -47,8 +47,12 @@ check_pipeline_running() {
         echo -e "${YELLOW}⚠️  Kafka Bridge not running${NC}"
     fi
     
-    if pgrep -f "ml_kafka_consumer" > /dev/null; then
-        echo -e "${GREEN}✓ ML Consumer is running${NC}"
+    # Check for either single model or ensemble consumer
+    if pgrep -f "two_model_consumer" > /dev/null; then
+        echo -e "${GREEN}✓ ML Consumer (Two-Model Ensemble) is running${NC}"
+        ((components_running++))
+    elif pgrep -f "ml_kafka_consumer" > /dev/null; then
+        echo -e "${GREEN}✓ ML Consumer (Single Model) is running${NC}"
         ((components_running++))
     else
         echo -e "${YELLOW}⚠️  ML Consumer not running${NC}"
