@@ -57,51 +57,42 @@ if ! ip link show "$NETWORK_INTERFACE" | grep -q "UP"; then
     sleep 2
 fi
 
+# Enable promiscuous mode (required for packet capture)
+echo -e "${BLUE}Enabling promiscuous mode on $NETWORK_INTERFACE...${NC}"
+ip link set "$NETWORK_INTERFACE" promisc on
+if ip link show "$NETWORK_INTERFACE" | grep -q "PROMISC"; then
+    echo -e "${GREEN}✓ Promiscuous mode enabled${NC}"
+else
+    echo -e "${YELLOW}⚠️  Could not enable promiscuous mode (Suricata will enable it)${NC}"
+fi
+
 # Create log directory if it doesn't exist
 mkdir -p "$SURICATA_LOG_DIR"
 
 # Check if Suricata is already running
-if pgrep -x suricata > /dev/null; then
-    echo -e "${YELLOW}⚠️  Suricata is already running${NC}"
-    echo "Process IDs:"
-    pgrep -a suricata
-    echo
-    read -p "Kill existing Suricata process? (y/n): " -r
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        pkill -9 suricata
-        sleep 2
-        echo -e "${GREEN}✓ Killed existing Suricata process${NC}"
-    else
-        echo "Aborted."
+PID_FILE="/var/run/suricata.pid"
+if [ -f "$PID_FILE" ]; then
+    PID=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$PID" ] && ps -p "$PID" > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  Suricata is already running${NC}"
+        echo -e "${CYAN}Current PID:${NC} $PID"
+        echo
+        echo -e "${BOLD}Process Info:${NC}"
+        ps aux | grep -E "^root.*$PID.*suricata"
+        echo
+        echo -e "${GREEN}✓ Suricata is already running - no action needed${NC}"
         exit 0
+    else
+        echo -e "${YELLOW}⚠️  Stale PID file found, removing...${NC}"
+        rm -f "$PID_FILE"
     fi
 fi
 
-# Create a minimal Suricata config for AF_PACKET mode if it doesn't exist
-AFPACKET_CONFIG="/etc/suricata/suricata-afpacket.yaml"
+# Use default Suricata config
+AFPACKET_CONFIG="/etc/suricata/suricata.yaml"
 if [ ! -f "$AFPACKET_CONFIG" ]; then
-    echo -e "${YELLOW}⚠️  Creating AF_PACKET config: $AFPACKET_CONFIG${NC}"
-    
-    # Backup default config if it exists
-    if [ -f "/etc/suricata/suricata.yaml" ]; then
-        cp /etc/suricata/suricata.yaml /etc/suricata/suricata.yaml.backup
-    fi
-    
-    # Use default config and modify for AF_PACKET
-    AFPACKET_CONFIG="/etc/suricata/suricata.yaml"
-fi
-
-# Check if Suricata is already running
-if pgrep -x suricata > /dev/null 2>&1 || [ -f /var/run/suricata.pid ]; then
-    echo -e "${YELLOW}⚠️  Suricata is already running${NC}"
-    PID=$(pgrep -x suricata 2>/dev/null || cat /var/run/suricata.pid 2>/dev/null)
-    echo -e "${CYAN}Current PID:${NC} $PID"
-    echo
-    echo -e "${BOLD}Process Info:${NC}"
-    ps aux | grep "[s]uricata" | grep -v grep
-    echo
-    echo -e "${GREEN}✓ Suricata is already running - no action needed${NC}"
-    exit 0
+    echo -e "${RED}❌ Suricata config not found: $AFPACKET_CONFIG${NC}"
+    exit 1
 fi
 
 # Display configuration
@@ -128,12 +119,41 @@ suricata -c "$AFPACKET_CONFIG" \
     --set outputs.5.eve-log.filename=eve.json \
     -D
 
-# Wait a moment for startup
-sleep 3
+# Wait for Suricata to fully initialize
+echo -e "${CYAN}Waiting for Suricata to initialize (daemon fork)...${NC}"
 
-# Check if Suricata started successfully
-if pgrep -x suricata > /dev/null; then
-    PID=$(pgrep -x suricata)
+# Wait for PID file to be created (daemon fork completes)
+RETRY_COUNT=0
+MAX_RETRIES=15
+PID_FILE="/var/run/suricata.pid"
+
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    if [ -f "$PID_FILE" ]; then
+        # PID file exists, verify process is actually running
+        PID=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$PID" ] && ps -p "$PID" > /dev/null 2>&1; then
+            # Process is running, wait a bit more for full initialization
+            sleep 2
+            # Verify still running after 2 seconds
+            if ps -p "$PID" > /dev/null 2>&1; then
+                echo -e "${GREEN}✓ Suricata daemon initialized successfully${NC}"
+                break
+            fi
+        fi
+    fi
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+    if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+        echo -e "${YELLOW}  Waiting for daemon to fork... ($RETRY_COUNT/$MAX_RETRIES)${NC}"
+        sleep 1
+    fi
+done
+
+# Final check if Suricata started successfully
+if [ -f "$PID_FILE" ]; then
+    PID=$(cat "$PID_FILE" 2>/dev/null)
+fi
+
+if [ -n "$PID" ] && ps -p "$PID" > /dev/null 2>&1; then
     echo -e "${GREEN}✓ Suricata started successfully!${NC}"
     echo -e "${CYAN}PID:${NC} $PID"
     echo
