@@ -272,9 +272,41 @@ stop_all() {
     echo -e "\n${GREEN}All services stopped${NC}"
 }
 
-replay_traffic() {
-    echo -e "\n${BOLD}${CYAN}═══ Traffic Replay ═══${NC}\n"
-    bash "${PIPELINE_SCRIPTS}/05_replay_traffic.sh"
+monitor_metrics() {
+    echo -e "\n${BOLD}${CYAN}═══ Metrics Monitor ═══${NC}\n"
+    
+    # Check if monitor script exists
+    MONITOR_SCRIPT="${SCRIPT_DIR}/monitor_metrics.sh"
+    if [ ! -f "$MONITOR_SCRIPT" ]; then
+        echo -e "${RED}❌ Monitor script not found: $MONITOR_SCRIPT${NC}"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}Select monitoring mode:${NC}"
+    echo -e "  ${GREEN}1${NC}) Live Dashboard (TUI)"
+    echo -e "  ${GREEN}2${NC}) System Status"
+    echo -e "  ${GREEN}3${NC}) Tail Logs"
+    echo -e "  ${GREEN}4${NC}) List Metric Files"
+    echo
+    read -p "Enter choice [1-4]: " monitor_choice
+    
+    case $monitor_choice in
+        1)
+            bash "$MONITOR_SCRIPT" --dashboard
+            ;;
+        2)
+            bash "$MONITOR_SCRIPT" --status
+            ;;
+        3)
+            bash "$MONITOR_SCRIPT" --tail
+            ;;
+        4)
+            bash "$MONITOR_SCRIPT" --files
+            ;;
+        *)
+            echo -e "${RED}Invalid choice${NC}"
+            ;;
+    esac
 }
 
 view_logs() {
@@ -320,7 +352,7 @@ show_menu() {
     echo -e "  ${GREEN}3${NC}) Start Suricata Only (AF_PACKET)"
     echo -e "  ${GREEN}4${NC}) Start ML Consumer Only"
     echo -e "  ${GREEN}5${NC}) Start Kafka Bridge Only"
-    echo -e "  ${GREEN}6${NC}) Replay Traffic (PCAP)"
+    echo -e "  ${GREEN}6${NC}) Monitor Metrics 📊"
     echo -e "  ${GREEN}7${NC}) Check Status"
     echo -e "  ${GREEN}8${NC}) View Logs"
     echo -e "  ${GREEN}9${NC}) Setup External Capture 🌐"
@@ -363,8 +395,8 @@ main() {
             bridge|5)
                 start_kafka_bridge
                 ;;
-            replay|6)
-                replay_traffic
+            metrics|6)
+                monitor_metrics
                 ;;
             status|7)
                 show_status
@@ -413,7 +445,7 @@ main() {
                 start_kafka_bridge
                 ;;
             6)
-                replay_traffic
+                monitor_metrics
                 ;;
             7)
                 show_status

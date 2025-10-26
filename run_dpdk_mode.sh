@@ -418,6 +418,43 @@ view_logs() {
     esac
 }
 
+monitor_metrics() {
+    echo -e "\n${BOLD}${CYAN}═══ Metrics Monitor ═══${NC}\n"
+    
+    # Check if monitor script exists
+    MONITOR_SCRIPT="${SCRIPT_DIR}/monitor_metrics.sh"
+    if [ ! -f "$MONITOR_SCRIPT" ]; then
+        echo -e "${RED}❌ Monitor script not found: $MONITOR_SCRIPT${NC}"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}Select monitoring mode:${NC}"
+    echo -e "  ${GREEN}1${NC}) Live Dashboard (TUI)"
+    echo -e "  ${GREEN}2${NC}) System Status"
+    echo -e "  ${GREEN}3${NC}) Tail Logs"
+    echo -e "  ${GREEN}4${NC}) List Metric Files"
+    echo
+    read -p "Enter choice [1-4]: " monitor_choice
+    
+    case $monitor_choice in
+        1)
+            bash "$MONITOR_SCRIPT" --dashboard
+            ;;
+        2)
+            bash "$MONITOR_SCRIPT" --status
+            ;;
+        3)
+            bash "$MONITOR_SCRIPT" --tail
+            ;;
+        4)
+            bash "$MONITOR_SCRIPT" --files
+            ;;
+        *)
+            echo -e "${RED}Invalid choice${NC}"
+            ;;
+    esac
+}
+
 show_dpdk_info() {
     echo -e "\n${BOLD}${CYAN}═══ DPDK Information ═══${NC}\n"
     
@@ -439,10 +476,11 @@ show_menu() {
     echo -e "  ${GREEN}5${NC}) Start Kafka Bridge Only"
     echo -e "  ${GREEN}6${NC}) Bind Interface to DPDK"
     echo -e "  ${GREEN}7${NC}) Unbind Interface from DPDK"
-    echo -e "  ${GREEN}8${NC}) Check Status"
-    echo -e "  ${GREEN}9${NC}) View Logs"
-    echo -e "  ${GREEN}10${NC}) Show DPDK Info"
-    echo -e "  ${GREEN}11${NC}) Stop All Services"
+    echo -e "  ${GREEN}8${NC}) Monitor Metrics 📊"
+    echo -e "  ${GREEN}9${NC}) Check Status"
+    echo -e "  ${GREEN}10${NC}) View Logs"
+    echo -e "  ${GREEN}11${NC}) Show DPDK Info"
+    echo -e "  ${GREEN}12${NC}) Stop All Services"
     echo -e "  ${RED}0${NC}) Exit"
     echo -e "${BOLD}${MAGENTA}═══════════════════════════════════════════${NC}\n"
 }
@@ -489,16 +527,19 @@ main() {
             unbind|7)
                 unbind_interface
                 ;;
-            status|8)
+            metrics|8)
+                monitor_metrics
+                ;;
+            status|9)
                 show_status
                 ;;
-            logs|9)
+            logs|10)
                 view_logs
                 ;;
-            info|10)
+            info|11)
                 show_dpdk_info
                 ;;
-            stop|11)
+            stop|12)
                 stop_all
                 ;;
             *)
@@ -512,7 +553,7 @@ main() {
     # Interactive menu
     while true; do
         show_menu
-        read -p "Enter choice [0-11]: " choice
+        read -p "Enter choice [0-12]: " choice
         
         case $choice in
             1)
@@ -543,15 +584,18 @@ main() {
                 unbind_interface
                 ;;
             8)
-                show_status
+                monitor_metrics
                 ;;
             9)
-                view_logs
+                show_status
                 ;;
             10)
-                show_dpdk_info
+                view_logs
                 ;;
             11)
+                show_dpdk_info
+                ;;
+            12)
                 stop_all
                 ;;
             0)
@@ -559,7 +603,7 @@ main() {
                 exit 0
                 ;;
             *)
-                echo -e "${RED}Invalid choice. Please enter 0-11${NC}"
+                echo -e "${RED}Invalid choice. Please enter 0-12${NC}"
                 ;;
         esac
         
