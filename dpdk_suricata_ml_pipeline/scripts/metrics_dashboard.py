@@ -138,15 +138,53 @@ def display_dashboard(stats):
     
     print()
     
-    # Latency Section
-    print("┌─ LATENCY (milliseconds) ───────────────────────────────────────────────┐")
+    # Pipeline Stage Latencies - NEW SECTION
+    print("┌─ PIPELINE STAGE LATENCIES (milliseconds) ───────────────────────────────┐")
+    if stats.get('latency'):
+        # Group by pipeline stages
+        stages = {
+            'Suricata': [],
+            'Kafka Bridge': [],
+            'ML Consumer': [],
+            'Ensemble': []
+        }
+        
+        for component_op, values in stats['latency'].items():
+            component = component_op.split('.')[0]
+            if 'suricata' in component.lower():
+                stages['Suricata'].append((component_op, values))
+            elif 'bridge' in component.lower() or 'kafka_bridge' in component.lower():
+                stages['Kafka Bridge'].append((component_op, values))
+            elif 'ensemble' in component.lower():
+                stages['Ensemble'].append((component_op, values))
+            elif 'ml_consumer' in component.lower() or 'consumer' in component.lower():
+                stages['ML Consumer'].append((component_op, values))
+        
+        print("│ Stage                                    Mean    P50    P95    P99    │")
+        print("├─────────────────────────────────────────────────────────────────────────┤")
+        
+        for stage_name, items in stages.items():
+            if items:
+                print(f"│ {stage_name:<35}                              │")
+                for comp_op, values in sorted(items, key=lambda x: x[1]['mean'], reverse=True)[:3]:
+                    operation = comp_op.split('.')[-1] if '.' in comp_op else comp_op
+                    op_short = ('  ↳ ' + operation)[:37] + '...' if len(operation) > 33 else ('  ↳ ' + operation)
+                    print(f"│ {op_short:<35} {values['mean']:6.2f} {values['p50']:6.2f} "
+                          f"{values['p95']:6.2f} {values['p99']:6.2f} │")
+    else:
+        print("│ No data available                                                       │")
+    print("└─────────────────────────────────────────────────────────────────────────┘")
+    print()
+    
+    # Detailed Latency Section (all components)
+    print("┌─ ALL COMPONENT LATENCIES (milliseconds) ────────────────────────────────┐")
     if stats.get('latency'):
         # Show top components by p95 latency
         sorted_components = sorted(
             stats['latency'].items(),
             key=lambda x: x[1]['p95'],
             reverse=True
-        )[:5]  # Show top 5
+        )[:8]  # Show top 8
         
         print("│ Component.Operation                      Mean    P50    P95    P99    │")
         print("├─────────────────────────────────────────────────────────────────────────┤")

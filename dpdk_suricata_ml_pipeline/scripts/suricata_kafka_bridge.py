@@ -17,7 +17,7 @@ from kafka.errors import KafkaError
 # Configuration
 EVE_LOG_PATH = '/var/log/suricata/eve.json'
 KAFKA_BOOTSTRAP_SERVERS = 'localhost:9092'
-KAFKA_TOPIC = 'suricata-alerts'
+KAFKA_TOPIC = 'suricata-events'  # Fixed: Changed from suricata-alerts to match consumer
 BUFFER_SIZE = 1024 * 1024  # 1MB buffer
 
 class SuricataKafkaBridge:

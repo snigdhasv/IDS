@@ -97,7 +97,7 @@ if ps -p $BRIDGE_PID > /dev/null 2>&1; then
     echo
     
     echo -e "${BOLD}Status:${NC}"
-    echo -e "  Suricata eve.json → Kafka topic: suricata-alerts"
+    echo -e "  Suricata eve.json → Kafka topic: suricata-events"
     echo -e "  PID: $BRIDGE_PID"
     echo
     

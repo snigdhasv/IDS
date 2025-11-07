@@ -255,13 +255,13 @@ class TwoModelKafkaConsumer:
         try:
             # Extract features
             with LatencyTimer(self.metrics, 'ensemble_consumer', 'feature_extraction'):
-                features = self.feature_extractor.extract_features(flow_event)
+                features = self.feature_extractor.extract_from_flow(flow_event)
                 if features is None:
                     return None
                 
-                # Map to 34-feature format
-                mapped_features = self.feature_mapper.map_features(features)
-                X = np.array([mapped_features])
+                # Map to 34-feature format (CICIDS2017 has 65 features)
+                # Returns already shaped as (1, 34) array
+                X = self.feature_mapper.map_features(features, source_count=65)
             
             # If collecting training data, buffer this sample
             if self.train_meta_learner and not self.ensemble.is_trained:
