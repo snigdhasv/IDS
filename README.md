@@ -2,13 +2,40 @@
 
 A high-performance Intrusion Detection System combining Suricata, Kafka, and Machine Learning for real-time threat detection and analysis.
 
-## � Documentation
+## 📚 Documentation
 
+- **[🛡️ DASHBOARD_GUIDE.md](DASHBOARD_GUIDE.md)** - **NEW!** Web dashboard for real-time monitoring
+- **[📊 DASHBOARD_QUICKSTART.md](DASHBOARD_QUICKSTART.md)** - Quick reference for the dashboard
 - **[🏗️ PIPELINE_ARCHITECTURE.md](PIPELINE_ARCHITECTURE.md)** - Detailed explanation of how both AF_PACKET and DPDK pipelines work
 - **[🚀 NEXT_STEPS.md](NEXT_STEPS.md)** - Roadmap and future development plans
 - **[📝 CLEANUP_REPORT.md](CLEANUP_REPORT.md)** - Recent codebase cleanup details
+- **[📈 METRICS_GUIDE.md](METRICS_GUIDE.md)** - Understanding metrics collection
 
-## �🚀 Quick Start
+## 🚀 Quick Start
+
+### 🆕 Monitor with Web Dashboard (Recommended)
+
+Launch the modern web-based monitoring dashboard for a better UI experience:
+
+```bash
+# Terminal 1: Start IDS Pipeline
+sudo ./run_afpacket_mode.sh
+
+# Terminal 2: Launch Dashboard
+./run_dashboard.sh
+```
+
+Dashboard opens at **http://localhost:8501** with:
+- 📊 Real-time metrics visualization
+- ⚡ Latency tracking with percentiles  
+- 🚀 Throughput monitoring
+- 🤖 ML prediction analytics
+- 💻 System resource usage
+- ⚠️ Error tracking
+
+**See [DASHBOARD_GUIDE.md](DASHBOARD_GUIDE.md) for full documentation.**
+
+---
 
 ### Choose Your Mode:
 

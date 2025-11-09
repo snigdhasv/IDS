@@ -8,6 +8,10 @@ requests>=2.26.0
 pyyaml>=6.0
 click>=8.0.0
 
+# Dashboard and visualization
+streamlit>=1.28.0
+plotly>=5.14.0
+
 # Network analysis
 scapy>=2.4.5
 pyshark>=0.4.5

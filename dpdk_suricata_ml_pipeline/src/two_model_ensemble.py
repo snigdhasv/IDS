@@ -254,9 +254,16 @@ class TwoModelEnsemble:
             confidences: Confidence scores (array)
             metrics: Dictionary with detailed metrics
         """
-        # Get probabilities from both models
+        import time
+        
+        # Get probabilities from both models with timing
+        t_start = time.time()
         proba1 = self.model1.predict_proba(X_input)
+        model1_time_ms = (time.time() - t_start) * 1000
+        
+        t_start = time.time()
         proba2 = self.model2.predict_proba(X_input)
+        model2_time_ms = (time.time() - t_start) * 1000
         
         # Align to common label space
         aligned1 = self._align_probabilities(proba1, self.model1.classes_)
@@ -274,13 +281,18 @@ class TwoModelEnsemble:
         agreement = (pred1 == pred2)
         self.metrics['agreement_rate'].extend(agreement)
         
-        # Choose weighting method
+        # Choose weighting method with timing
+        meta_time_ms = 0
         if method == 'meta_learner':
             if not self.is_trained:
                 logger.warning("Meta-learner not trained. Falling back to average.")
                 method = 'average'
+                w1 = np.full(len(X_input), 0.5)
+                w2 = np.full(len(X_input), 0.5)
             else:
+                t_start = time.time()
                 w1, w2 = self._predict_weights_with_meta_learner(aligned1, aligned2)
+                meta_time_ms = (time.time() - t_start) * 1000
         
         elif method == 'confidence_adaptive':
             # Simple confidence-based weighting
@@ -318,6 +330,10 @@ class TwoModelEnsemble:
             'avg_weight_model2': np.mean(w2),
             'model1_avg_conf': np.mean(conf1),
             'model2_avg_conf': np.mean(conf2),
+            # Add timing metrics
+            'model1_time_ms': model1_time_ms,
+            'model2_time_ms': model2_time_ms,
+            'meta_time_ms': meta_time_ms,
         }
         
         return predictions, confidences, metrics
