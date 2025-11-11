@@ -17,6 +17,7 @@ import logging
 import sys
 import time
 import signal
+import csv
 from typing import Dict, List, Optional
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +37,12 @@ from alert_processor import AlertProcessor
 LOG_DIR = Path(__file__).parent.parent / 'logs' / 'ml'
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / 'ml_consumer.log'
+PREDICTIONS_LOG_FILE = LOG_DIR / 'all_predictions.log'
+
+# CSV file for predictions
+METRICS_DIR = Path(__file__).parent.parent.parent / 'logs' / 'metrics'
+METRICS_DIR.mkdir(parents=True, exist_ok=True)
+PREDICTIONS_CSV = METRICS_DIR / f'ml_{datetime.now().strftime("%Y%m%d")}.csv'
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,6 +53,14 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Create a separate logger for all predictions (including benign)
+predictions_logger = logging.getLogger('predictions')
+predictions_logger.setLevel(logging.INFO)
+predictions_handler = logging.FileHandler(PREDICTIONS_LOG_FILE)
+predictions_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+predictions_logger.addHandler(predictions_handler)
+predictions_logger.propagate = False  # Don't propagate to root logger
 
 
 class Colors:
@@ -93,7 +108,13 @@ class MLEnhancedKafkaConsumer:
             'events_processed': 0,
             'flows_processed': 0,
             'alerts_processed': 0,
+            'dns_processed': 0,
+            'http_processed': 0,
+            'tls_processed': 0,
+            'other_protocols_processed': 0,
             'ml_predictions': 0,
+            'benign_predictions': 0,
+            'malicious_predictions': 0,
             'ml_alerts_generated': 0,
             'enhanced_alerts_sent': 0,
             'errors': 0,
@@ -276,9 +297,12 @@ class MLEnhancedKafkaConsumer:
                 self._process_flow_event(event)
             elif event_type == 'alert':
                 self._process_alert_event(event)
+            elif event_type in ['dns', 'http', 'tls', 'ssh', 'smb']:
+                # Process protocol-specific events with basic threat detection
+                self._process_protocol_event(event, event_type)
             else:
-                # Other event types (http, dns, tls, etc.) - log for now
-                logger.debug(f"Received {event_type} event (not processed)")
+                # Other event types - just log for statistics
+                logger.debug(f"Received {event_type} event (logged but not analyzed)")
         
         except Exception as e:
             logger.error(f"Error in process_event: {e}", exc_info=True)
@@ -318,6 +342,12 @@ class MLEnhancedKafkaConsumer:
             confidence = float(np.max(probabilities[0])) if len(probabilities) > 0 else 0.0
             self.stats['ml_predictions'] += 1
             
+            # Track benign vs malicious
+            if prediction == 'BENIGN':
+                self.stats['benign_predictions'] += 1
+            else:
+                self.stats['malicious_predictions'] += 1
+            
             # Track prediction distribution
             if prediction not in self.performance_metrics['predictions_by_class']:
                 self.performance_metrics['predictions_by_class'][prediction] = 0
@@ -326,12 +356,25 @@ class MLEnhancedKafkaConsumer:
             # Track confidence scores
             self.performance_metrics['confidence_scores'].append(confidence)
             
+            # Log ALL predictions (benign and malicious)
+            flow_desc = (
+                f"{flow_event.get('src_ip')}:{flow_event.get('src_port')} → "
+                f"{flow_event.get('dest_ip')}:{flow_event.get('dest_port')}"
+            )
+            
+            # Log both benign and malicious at INFO level so users can see all predictions
             if prediction and prediction != 'BENIGN':
                 logger.info(
-                    f"ML Alert: {prediction} (confidence: {confidence:.2%}) - "
-                    f"{flow_event.get('src_ip')}:{flow_event.get('src_port')} → "
-                    f"{flow_event.get('dest_ip')}:{flow_event.get('dest_port')}"
+                    f"ML Alert: {prediction} (confidence: {confidence:.2%}) - {flow_desc}"
                 )
+            else:
+                # Log benign predictions at INFO level too (changed from DEBUG)
+                logger.info(
+                    f"ML Benign: BENIGN (confidence: {confidence:.2%}) - {flow_desc}"
+                )
+            
+            # Always save prediction to dedicated predictions log file
+            self._log_prediction(flow_event, prediction, confidence)
             
             # Process ML alert (no correlation with Suricata alerts)
             enhanced_alert = self.alert_processor.process_flow_with_ml(
@@ -375,6 +418,121 @@ class MLEnhancedKafkaConsumer:
             logger.error(f"Error processing alert event: {e}", exc_info=True)
             self.stats['errors'] += 1
     
+    def _process_protocol_event(self, event: Dict, event_type: str):
+        """
+        Process protocol-specific events (DNS, HTTP, TLS, SSH, SMB).
+        
+        While these can't be fed directly into ML models trained on flow features,
+        we can perform basic threat intelligence and pattern matching.
+        """
+        try:
+            # Track protocol-specific stats
+            if event_type == 'dns':
+                self.stats['dns_processed'] += 1
+                self._analyze_dns_event(event)
+            elif event_type == 'http':
+                self.stats['http_processed'] += 1
+                self._analyze_http_event(event)
+            elif event_type == 'tls':
+                self.stats['tls_processed'] += 1
+                self._analyze_tls_event(event)
+            else:
+                self.stats['other_protocols_processed'] += 1
+            
+            logger.debug(f"Processed {event_type} event")
+            
+        except Exception as e:
+            logger.error(f"Error processing {event_type} event: {e}", exc_info=True)
+            self.stats['errors'] += 1
+    
+    def _analyze_dns_event(self, dns_event: Dict):
+        """Analyze DNS events for suspicious patterns."""
+        dns = dns_event.get('dns', {})
+        query = dns.get('rrname', '')
+        
+        # Basic suspicious pattern detection
+        suspicious_patterns = [
+            'dga',  # Domain Generation Algorithm patterns
+            'longdomain',  # Excessively long domains
+            'base64',  # Base64 encoded strings
+            'hexstring',  # Hex strings in domain
+        ]
+        
+        # Check for suspicious patterns
+        is_suspicious = any(pattern in query.lower() for pattern in suspicious_patterns)
+        
+        if is_suspicious or len(query) > 50:
+            logger.info(f"Suspicious DNS query: {query}")
+    
+    def _analyze_http_event(self, http_event: Dict):
+        """Analyze HTTP events for suspicious patterns."""
+        http = http_event.get('http', {})
+        method = http.get('http_method', '')
+        uri = http.get('url', '')
+        user_agent = http.get('http_user_agent', '')
+        
+        # Check for suspicious patterns
+        suspicious_uris = ['../..', 'etc/passwd', 'cmd.exe', 'eval(', '<script>']
+        suspicious_agents = ['sqlmap', 'nikto', 'nmap', 'scanner']
+        
+        if any(pattern in uri.lower() for pattern in suspicious_uris):
+            logger.info(f"Suspicious HTTP URI: {method} {uri}")
+        
+        if any(pattern in user_agent.lower() for pattern in suspicious_agents):
+            logger.info(f"Suspicious User-Agent: {user_agent}")
+    
+    def _analyze_tls_event(self, tls_event: Dict):
+        """Analyze TLS events for suspicious patterns."""
+        tls = tls_event.get('tls', {})
+        sni = tls.get('sni', '')
+        ja3 = tls.get('ja3', {})
+        
+        # Check for suspicious TLS patterns
+        if sni and (len(sni) > 50 or any(c.isdigit() for c in sni.replace('.', ''))):
+            logger.info(f"Suspicious TLS SNI: {sni}")
+        
+        # JA3 fingerprint analysis could be added here
+        if ja3:
+            logger.debug(f"TLS JA3: {ja3.get('hash', 'N/A')}")
+    
+    def _log_prediction(self, flow_event: Dict, prediction: str, confidence: float):
+        """
+        Log all predictions to dedicated predictions file and CSV for analysis.
+        
+        This ensures we have a complete record of all ML predictions,
+        both benign and malicious, for later analysis and model improvement.
+        """
+        try:
+            flow_info = {
+                'timestamp': flow_event.get('timestamp', datetime.now(datetime.UTC).isoformat()),
+                'src_ip': flow_event.get('src_ip'),
+                'src_port': flow_event.get('src_port'),
+                'dest_ip': flow_event.get('dest_ip'),
+                'dest_port': flow_event.get('dest_port'),
+                'proto': flow_event.get('proto'),
+                'prediction': prediction,
+                'confidence': round(confidence, 4),
+                'is_malicious': prediction != 'BENIGN'
+            }
+            
+            # Log to predictions file (JSON)
+            predictions_logger.info(json.dumps(flow_info))
+            
+            # Write to CSV for easy analysis
+            file_exists = PREDICTIONS_CSV.exists()
+            with open(PREDICTIONS_CSV, 'a', newline='') as csvfile:
+                fieldnames = ['timestamp', 'src_ip', 'src_port', 'dest_ip', 'dest_port', 
+                             'proto', 'prediction', 'confidence', 'is_malicious']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                
+                if not file_exists:
+                    writer.writeheader()
+                
+                writer.writerow(flow_info)
+            
+        except Exception as e:
+            logger.error(f"Error logging prediction: {e}")
+    
     def _send_to_kafka(self, alert: Dict):
         """Send enhanced alert to Kafka output topic."""
         try:
@@ -397,16 +555,36 @@ class MLEnhancedKafkaConsumer:
         
         # === THROUGHPUT METRICS ===
         print(f"{Colors.BOLD}{Colors.BLUE}📊 THROUGHPUT METRICS{Colors.END}")
-        print(f"  Events processed:      {self.stats['events_processed']:,}")
-        print(f"  Flows processed:       {self.stats['flows_processed']:,}")
-        print(f"  Alerts processed:      {self.stats['alerts_processed']:,}")
+        print(f"  Total events:          {self.stats['events_processed']:,}")
+        print(f"  ├─ Flows:              {self.stats['flows_processed']:,}")
+        print(f"  ├─ DNS:                {self.stats['dns_processed']:,}")
+        print(f"  ├─ HTTP:               {self.stats['http_processed']:,}")
+        print(f"  ├─ TLS:                {self.stats['tls_processed']:,}")
+        print(f"  ├─ Alerts:             {self.stats['alerts_processed']:,}")
+        print(f"  └─ Other:              {self.stats['other_protocols_processed']:,}")
+        print()
         print(f"  ML predictions:        {self.stats['ml_predictions']:,}")
+        print(f"  ├─ Benign:             {self.stats['benign_predictions']:,} ({self.stats['benign_predictions']/max(self.stats['ml_predictions'],1)*100:.1f}%)")
+        print(f"  └─ Malicious:          {self.stats['malicious_predictions']:,} ({self.stats['malicious_predictions']/max(self.stats['ml_predictions'],1)*100:.1f}%)")
+        print()
         print(f"  ML alerts generated:   {self.stats['ml_alerts_generated']:,}")
         print(f"  Enhanced alerts sent:  {self.stats['enhanced_alerts_sent']:,}")
+        print()
         if runtime > 0:
-            print(f"  Events/sec:            {self.stats['events_processed']/runtime:.2f}")
-            print(f"  Flows/sec:             {self.stats['flows_processed']/runtime:.2f}")
-            print(f"  Predictions/sec:       {self.stats['ml_predictions']/runtime:.2f}")
+            print(f"  Throughput:")
+            print(f"  ├─ Events/sec:         {self.stats['events_processed']/runtime:.2f}")
+            print(f"  ├─ Flows/sec:          {self.stats['flows_processed']/runtime:.2f}")
+            print(f"  └─ Predictions/sec:    {self.stats['ml_predictions']/runtime:.2f}")
+        print()
+        
+        # === COVERAGE METRICS ===
+        print(f"{Colors.BOLD}{Colors.GREEN}✓ PREDICTION COVERAGE{Colors.END}")
+        flow_coverage = (self.stats['ml_predictions'] / max(self.stats['flows_processed'], 1)) * 100
+        print(f"  Flows predicted:       {self.stats['ml_predictions']:,} / {self.stats['flows_processed']:,} ({flow_coverage:.1f}%)")
+        if flow_coverage < 100:
+            print(f"  {Colors.YELLOW}⚠️  Some flows not predicted - check logs for feature extraction failures{Colors.END}")
+        else:
+            print(f"  {Colors.GREEN}✓ 100% flow coverage!{Colors.END}")
         print()
         
         # === LATENCY METRICS ===

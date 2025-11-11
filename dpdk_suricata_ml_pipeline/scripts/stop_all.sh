@@ -69,7 +69,14 @@ fi
 
 # Ask about Kafka
 echo -e "\n${BLUE}Kafka Management${NC}"
-if netstat -tuln 2>/dev/null | grep -q ":9092"; then
+# Use ss if netstat is not available
+if command -v netstat &> /dev/null; then
+    KAFKA_RUNNING=$(netstat -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
+else
+    KAFKA_RUNNING=$(ss -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
+fi
+
+if [ "$KAFKA_RUNNING" = "yes" ]; then
     read -p "Stop Kafka? (y/N): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
@@ -120,7 +127,13 @@ echo
 echo -e "${BOLD}Status:${NC}"
 echo -e "  ML Consumer: ${CYAN}$(pgrep -f 'ml_kafka_consumer.py' > /dev/null && echo 'Running' || echo 'Stopped')${NC}"
 echo -e "  Suricata:    ${CYAN}$(pgrep -x 'suricata' > /dev/null && echo 'Running' || echo 'Stopped')${NC}"
-echo -e "  Kafka:       ${CYAN}$(netstat -tuln 2>/dev/null | grep -q ':9092' && echo 'Running' || echo 'Stopped')${NC}"
+# Use ss if netstat is not available
+if command -v netstat &> /dev/null; then
+    KAFKA_STATUS=$(netstat -tuln 2>/dev/null | grep -q ':9092' && echo 'Running' || echo 'Stopped')
+else
+    KAFKA_STATUS=$(ss -tuln 2>/dev/null | grep -q ':9092' && echo 'Running' || echo 'Stopped')
+fi
+echo -e "  Kafka:       ${CYAN}${KAFKA_STATUS}${NC}"
 echo -e "  DPDK Bound:  ${CYAN}$DPDK_BOUND interface(s)${NC}"
 echo
 

@@ -32,8 +32,15 @@ else
 fi
 
 # Check if Kafka is already installed
-KAFKA_DIR="/opt/kafka"
-if [ -d "$KAFKA_DIR" ] && [ -f "$KAFKA_DIR/bin/kafka-server-start.sh" ]; then
+# Check multiple possible locations
+KAFKA_DIR=""
+if [ -d "/opt/kafka" ] && [ -f "/opt/kafka/bin/kafka-server-start.sh" ]; then
+    KAFKA_DIR="/opt/kafka"
+elif [ -d "/usr/local/kafka" ] && [ -f "/usr/local/kafka/bin/kafka-server-start.sh" ]; then
+    KAFKA_DIR="/usr/local/kafka"
+fi
+
+if [ -n "$KAFKA_DIR" ]; then
     echo -e "${GREEN}✓ Kafka already installed at $KAFKA_DIR${NC}"
     KAFKA_INSTALLED=true
     # Add to PATH for this session
@@ -45,6 +52,7 @@ elif command -v kafka-server-start.sh &> /dev/null; then
 else
     echo -e "${YELLOW}Kafka not found. Installing...${NC}"
     KAFKA_INSTALLED=false
+    KAFKA_DIR="/opt/kafka"
 fi
 
 # Install Kafka if needed
@@ -73,26 +81,78 @@ fi
 KAFKA_BIN="$KAFKA_DIR/bin"
 
 # Check if Kafka is running
-if netstat -tuln 2>/dev/null | grep -q ":9092"; then
+# Use ss if netstat is not available
+if command -v netstat &> /dev/null; then
+    KAFKA_RUNNING=$(netstat -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
+else
+    KAFKA_RUNNING=$(ss -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
+fi
+
+if [ "$KAFKA_RUNNING" = "yes" ]; then
     echo -e "${GREEN}✓ Kafka already running${NC}"
 else
     echo -e "\n${BLUE}Starting Kafka services...${NC}"
     
-    # Start Zookeeper in background
-    echo -e "${CYAN}Starting Zookeeper...${NC}"
-    $KAFKA_BIN/zookeeper-server-start.sh -daemon $KAFKA_DIR/config/zookeeper.properties
-    sleep 5
+    # Check if Zookeeper is running
+    ZOOKEEPER_RUNNING=$(pgrep -f "zookeeper" > /dev/null && echo "yes" || echo "no")
+    
+    if [ "$ZOOKEEPER_RUNNING" = "no" ]; then
+        # Start Zookeeper in background
+        echo -e "${CYAN}Starting Zookeeper...${NC}"
+        $KAFKA_BIN/zookeeper-server-start.sh -daemon $KAFKA_DIR/config/zookeeper.properties
+        sleep 5
+        
+        # Verify Zookeeper started
+        if ! pgrep -f "zookeeper" > /dev/null; then
+            echo -e "${RED}❌ Failed to start Zookeeper${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}✓ Zookeeper started${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Zookeeper already running${NC}"
+        
+        # Clean stale Kafka broker registration in Zookeeper
+        echo -e "${CYAN}Checking for stale broker registrations...${NC}"
+        
+        # Stop any stale Kafka processes
+        if pgrep -f "kafka.Kafka" > /dev/null; then
+            echo -e "${YELLOW}Stopping stale Kafka process...${NC}"
+            pkill -9 -f "kafka.Kafka"
+            sleep 2
+        fi
+        
+        # Remove Kafka data directory to clean stale registrations
+        if [ -d "/tmp/kafka-logs" ]; then
+            echo -e "${CYAN}Cleaning stale Kafka data...${NC}"
+            rm -rf /tmp/kafka-logs
+        fi
+    fi
     
     # Start Kafka in background
     echo -e "${CYAN}Starting Kafka broker...${NC}"
     $KAFKA_BIN/kafka-server-start.sh -daemon $KAFKA_DIR/config/server.properties
-    sleep 5
+    sleep 8
     
-    # Verify
-    if netstat -tuln | grep -q ":9092"; then
+    # Verify Kafka started
+    # Use ss if netstat is not available
+    if command -v netstat &> /dev/null; then
+        KAFKA_STARTED=$(netstat -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
+    else
+        KAFKA_STARTED=$(ss -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
+    fi
+    
+    if [ "$KAFKA_STARTED" = "yes" ]; then
         echo -e "${GREEN}✓ Kafka started successfully${NC}"
     else
         echo -e "${RED}❌ Failed to start Kafka${NC}"
+        echo -e "${YELLOW}Checking logs for errors...${NC}"
+        if [ -f "$KAFKA_DIR/logs/server.log" ]; then
+            tail -20 "$KAFKA_DIR/logs/server.log" | grep -i error || echo "No errors found in recent logs"
+        fi
+        echo
+        echo -e "${CYAN}To manually clean and retry:${NC}"
+        echo -e "  ${YELLOW}sudo $SCRIPT_DIR/cleanup_kafka.sh${NC}"
+        echo -e "  ${YELLOW}sudo ./run_afpacket_mode.sh${NC}"
         exit 1
     fi
 fi

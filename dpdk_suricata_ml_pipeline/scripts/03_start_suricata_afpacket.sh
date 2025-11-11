@@ -116,7 +116,9 @@ suricata -c "$AFPACKET_CONFIG" \
     --set af-packet.0.cluster-type=cluster_flow \
     --set outputs.5.eve-log.enabled=yes \
     --set outputs.5.eve-log.filetype=regular \
-    --set outputs.5.eve-log.filename=eve.json \
+        --set outputs.5.eve-log.filename=eve.json \
+        --set outputs.5.eve-log.types.0.flow.enabled=yes \
+        --set outputs.5.eve-log.types.0.flow.pcap=false \
     -D
 
 # Wait for Suricata to fully initialize

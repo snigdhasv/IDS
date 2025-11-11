@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>FEATURE_MISMATCH_ANALYSIS.md</title>
+    <meta http-equiv="Content-type" content="text/html;charset=UTF-8">
+    
+<style>
+/* https://github.com/microsoft/vscode/blob/master/extensions/markdown-language-features/media/markdown.css */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+body {
+	font-family: var(--vscode-markdown-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif);
+	font-size: var(--vscode-markdown-font-size, 14px);
+	padding: 0 26px;
+	line-height: var(--vscode-markdown-line-height, 22px);
+	word-wrap: break-word;
+}
+
+html,footer,header{
+	font-family: var(--vscode-markdown-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif);
+	font-size: var(--vscode-markdown-font-size, 14px);
+}
+
+#code-csp-warning {
+	position: fixed;
+	top: 0;
+	right: 0;
+	color: white;
+	margin: 16px;
+	text-align: center;
+	font-size: 12px;
+	font-family: sans-serif;
+	background-color:#444444;
+	cursor: pointer;
+	padding: 6px;
+	box-shadow: 1px 1px 1px rgba(0,0,0,.25);
+}
+
+#code-csp-warning:hover {
+	text-decoration: none;
+	background-color:#007acc;
+	box-shadow: 2px 2px 2px rgba(0,0,0,.25);
+}
+
+body.scrollBeyondLastLine {
+	margin-bottom: calc(100vh - 22px);
+}
+
+body.showEditorSelection .code-line {
+	position: relative;
+}
+
+body.showEditorSelection .code-active-line:before,
+body.showEditorSelection .code-line:hover:before {
+	content: "";
+	display: block;
+	position: absolute;
+	top: 0;
+	left: -12px;
+	height: 100%;
+}
+
+body.showEditorSelection li.code-active-line:before,
+body.showEditorSelection li.code-line:hover:before {
+	left: -30px;
+}
+
+.vscode-light.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.15);
+}
+
+.vscode-light.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.40);
+}
+
+.vscode-light.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-dark.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.4);
+}
+
+.vscode-dark.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.60);
+}
+
+.vscode-dark.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-high-contrast.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 160, 0, 0.7);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 160, 0, 1);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+img {
+	max-width: 100%;
+	max-height: 100%;
+}
+
+a {
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+a:focus,
+input:focus,
+select:focus,
+textarea:focus {
+	outline: 1px solid -webkit-focus-ring-color;
+	outline-offset: -1px;
+}
+
+hr {
+	border: 0;
+	height: 2px;
+	border-bottom: 2px solid;
+}
+
+h1 {
+	padding-bottom: 0.3em;
+	line-height: 1.2;
+	border-bottom-width: 1px;
+	border-bottom-style: solid;
+}
+
+h1, h2, h3 {
+	font-weight: normal;
+}
+
+table {
+	border-collapse: collapse;
+}
+
+table > thead > tr > th {
+	text-align: left;
+	border-bottom: 1px solid;
+}
+
+table > thead > tr > th,
+table > thead > tr > td,
+table > tbody > tr > th,
+table > tbody > tr > td {
+	padding: 5px 10px;
+}
+
+table > tbody > tr + tr > td {
+	border-top: 1px solid;
+}
+
+blockquote {
+	margin: 0 7px 0 5px;
+	padding: 0 16px 0 10px;
+	border-left-width: 5px;
+	border-left-style: solid;
+}
+
+code {
+	font-family: Menlo, Monaco, Consolas, "Droid Sans Mono", "Courier New", monospace, "Droid Sans Fallback";
+	font-size: 1em;
+	line-height: 1.357em;
+}
+
+body.wordWrap pre {
+	white-space: pre-wrap;
+}
+
+pre:not(.hljs),
+pre.hljs code > div {
+	padding: 16px;
+	border-radius: 3px;
+	overflow: auto;
+}
+
+pre code {
+	color: var(--vscode-editor-foreground);
+	tab-size: 4;
+}
+
+/** Theming */
+
+.vscode-light pre {
+	background-color: rgba(220, 220, 220, 0.4);
+}
+
+.vscode-dark pre {
+	background-color: rgba(10, 10, 10, 0.4);
+}
+
+.vscode-high-contrast pre {
+	background-color: rgb(0, 0, 0);
+}
+
+.vscode-high-contrast h1 {
+	border-color: rgb(0, 0, 0);
+}
+
+.vscode-light table > thead > tr > th {
+	border-color: rgba(0, 0, 0, 0.69);
+}
+
+.vscode-dark table > thead > tr > th {
+	border-color: rgba(255, 255, 255, 0.69);
+}
+
+.vscode-light h1,
+.vscode-light hr,
+.vscode-light table > tbody > tr + tr > td {
+	border-color: rgba(0, 0, 0, 0.18);
+}
+
+.vscode-dark h1,
+.vscode-dark hr,
+.vscode-dark table > tbody > tr + tr > td {
+	border-color: rgba(255, 255, 255, 0.18);
+}
+
+</style>
+
+<style>
+/* Tomorrow Theme */
+/* http://jmblog.github.com/color-themes-for-google-code-highlightjs */
+/* Original theme - https://github.com/chriskempson/tomorrow-theme */
+
+/* Tomorrow Comment */
+.hljs-comment,
+.hljs-quote {
+	color: #8e908c;
+}
+
+/* Tomorrow Red */
+.hljs-variable,
+.hljs-template-variable,
+.hljs-tag,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-regexp,
+.hljs-deletion {
+	color: #c82829;
+}
+
+/* Tomorrow Orange */
+.hljs-number,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-literal,
+.hljs-type,
+.hljs-params,
+.hljs-meta,
+.hljs-link {
+	color: #f5871f;
+}
+
+/* Tomorrow Yellow */
+.hljs-attribute {
+	color: #eab700;
+}
+
+/* Tomorrow Green */
+.hljs-string,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition {
+	color: #718c00;
+}
+
+/* Tomorrow Blue */
+.hljs-title,
+.hljs-section {
+	color: #4271ae;
+}
+
+/* Tomorrow Purple */
+.hljs-keyword,
+.hljs-selector-tag {
+	color: #8959a8;
+}
+
+.hljs {
+	display: block;
+	overflow-x: auto;
+	color: #4d4d4c;
+	padding: 0.5em;
+}
+
+.hljs-emphasis {
+	font-style: italic;
+}
+
+.hljs-strong {
+	font-weight: bold;
+}
+</style>
+
+<style>
+/*
+ * Custom MD PDF CSS
+ */
+html,footer,header{
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "Meiryo";
+
+ }
+body {
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "Meiryo";
+	padding: 0 12px;
+}
+
+pre {
+	background-color: #f8f8f8;
+	border: 1px solid #cccccc;
+	border-radius: 3px;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+}
+
+pre:not(.hljs) {
+	padding: 23px;
+	line-height: 19px;
+}
+
+blockquote {
+	background: rgba(127, 127, 127, 0.1);
+	border-color: rgba(0, 122, 204, 0.5);
+}
+
+.emoji {
+	height: 1.4em;
+}
+
+code {
+	font-size: 14px;
+	line-height: 19px;
+}
+
+/* for inline code */
+:not(pre):not(.hljs) > code {
+	color: #C9AE75; /* Change the old color so it seems less like an error */
+	font-size: inherit;
+}
+
+/* Page Break : use <div class="page"/> to insert page break
+-------------------------------------------------------- */
+.page {
+	page-break-after: always;
+}
+
+</style>
+<link rel="stylesheet" href="file:///home/s-ujay/Programming/R%3A%5C2.Travail%5C1.Enseignement%5CCours%5C_1.Outils%5C2.Developpement%5C1.SCSS%5Cmain.css" type="text/css"><link rel="stylesheet" href="file:///home/s-ujay/Programming/D%3A%5Crdaros%5CCours%5C_1.Outils%5C2.Developpement%5C1.SCSS%5Cmain.css" type="text/css">
+</head>
+
+<body>
+    <h1 id="feature-mismatch-resolution---root-cause-analysis">Feature Mismatch Resolution - Root Cause Analysis</h1>
+<h2 id="%F0%9F%94%B4-problem-summary">🔴 Problem Summary</h2>
+<p><strong>Current State:</strong></p>
+<ul>
+<li>Feature Engine extracts: <strong>77 features</strong></li>
+<li>Models expect: <strong>69 features</strong></li>
+<li>Scaler expects: <strong>69 features</strong></li>
+<li>Result: <code>StandardScaler is expecting 69 features as input</code></li>
+</ul>
+<h2 id="%F0%9F%94%8D-root-cause">🔍 Root Cause</h2>
+<p>The CICIDS2017 CSV files have <strong>inconsistent whitespace</strong> in column names:</p>
+<ul>
+<li>Some columns: <code>&quot; ACK Flag Count&quot;</code> (with leading space)</li>
+<li>Others: <code>&quot;Total Length of Fwd Packets&quot;</code> (no leading space)</li>
+</ul>
+<p>When the training script (<code>retrain_models_raw_features.py</code>) runs:</p>
+<ol>
+<li>✅ Strips whitespace from column names (line 183)</li>
+<li>✅ Drops zero-variance columns (13 columns)</li>
+<li>✅ Drops duplicate <code>Fwd Header Length.1</code></li>
+<li>❌ Final dataset: <strong>69 features</strong> (not 77)</li>
+</ol>
+<p>The discrepancy (77 vs 69 = <strong>8 features</strong>) is likely because:</p>
+<ul>
+<li>Training script drops more columns during balance/SMOTE</li>
+<li>Or some features become zero-variance after sampling</li>
+</ul>
+<h2 id="%E2%9C%85-solution-three-part-fix">✅ Solution: Three-Part Fix</h2>
+<h3 id="part-1-identify-exact-69-features-done">Part 1: Identify Exact 69 Features (DONE)</h3>
+<p>We need to know which 69 features the models were actually trained on:</p>
+<pre class="hljs"><code><div><span class="hljs-comment"># Extract from the training process</span>
+<span class="hljs-keyword">import</span> pandas <span class="hljs-keyword">as</span> pd
+df = pd.read_csv(<span class="hljs-string">'dataset/CICIDS2017_raw/Monday-WorkingHours.pcap_ISCX.csv'</span>, nrows=<span class="hljs-number">1000</span>)
+df.columns = [col.strip() <span class="hljs-keyword">for</span> col <span class="hljs-keyword">in</span> df.columns]
+df = df.drop(<span class="hljs-string">'Label'</span>, axis=<span class="hljs-number">1</span>)
+<span class="hljs-comment"># ... apply same preprocessing as training script ...</span>
+<span class="hljs-comment"># Final list = 69 features</span>
+</div></code></pre>
+<h3 id="part-2-update-feature-engine-or-retrain-models">Part 2: Update Feature Engine OR Retrain Models</h3>
+<p><strong>Option A (QUICK FIX): Use Only 69 Features in Consumer</strong></p>
+<ul>
+<li>Create feature selector mapping: 77 → 69</li>
+<li>Extract only the 69 features models need</li>
+<li>Apply scaling</li>
+<li>✅ Works immediately</li>
+<li>❌ Wastes 8 features from engine</li>
+</ul>
+<p><strong>Option B (PROPER FIX): Retrain Models on 77 Features</strong></p>
+<ul>
+<li>Update training script to NOT drop any features engine extracts</li>
+<li>Retrain all 6 models on 77-feature dataset</li>
+<li>Save new scaler for 77 features</li>
+<li>Update consumer to use new models</li>
+<li>✅ Uses all available features (better accuracy potential)</li>
+<li>❌ Takes ~3 minutes to retrain</li>
+</ul>
+<h3 id="part-3-save-feature-names-with-models">Part 3: Save Feature Names with Models</h3>
+<p>Update training script to save feature names:</p>
+<pre class="hljs"><code><div><span class="hljs-comment"># After creating X_train</span>
+feature_names = X_train.columns.tolist()
+joblib.dump(feature_names, <span class="hljs-string">'ML Models/feature_names_2017_raw.joblib'</span>)
+
+<span class="hljs-comment"># Also save scaler with feature names</span>
+scaler.feature_names_in_ = feature_names
+</div></code></pre>
+<p>This prevents future mismatches.</p>
+<h2 id="%F0%9F%9A%80-recommended-action-plan">🚀 Recommended Action Plan</h2>
+<p><strong>Immediate (get it working now):</strong></p>
+<ol>
+<li>
+<p><strong>Identify the 69 features</strong> models were trained on</p>
+<pre class="hljs"><code><div>python3 extract_training_features.py  <span class="hljs-comment"># creates /tmp/model_features.txt</span>
+</div></code></pre>
+</li>
+<li>
+<p><strong>Create feature selector for 77→69</strong></p>
+<pre class="hljs"><code><div><span class="hljs-comment"># In realtime_ensemble_consumer.py</span>
+MODEL_FEATURES = [... list of <span class="hljs-number">69</span> feature names ...]
+
+<span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">select_model_features</span><span class="hljs-params">(engine_features: Dict)</span> -&gt; List:</span>
+    <span class="hljs-keyword">return</span> [engine_features.get(fname, <span class="hljs-number">0</span>) <span class="hljs-keyword">for</span> fname <span class="hljs-keyword">in</span> MODEL_FEATURES]
+</div></code></pre>
+</li>
+<li>
+<p><strong>Apply scaler to 69 features</strong></p>
+<pre class="hljs"><code><div>selected = select_model_features(features_dict)
+feature_vector = np.array(selected).reshape(<span class="hljs-number">1</span>, <span class="hljs-number">-1</span>)
+feature_vector = scaler.transform(feature_vector)  <span class="hljs-comment"># Now 69→69 ✓</span>
+</div></code></pre>
+</li>
+</ol>
+<p><strong>Long-term (proper solution):</strong></p>
+<ol>
+<li>
+<p><strong>Retrain on 77 features</strong></p>
+<ul>
+<li>Modify <code>retrain_models_raw_features.py</code>:
+<ul>
+<li>Skip zero-variance removal for features engine extracts</li>
+<li>Or update engine to NOT extract zero-variance features</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>Save feature metadata</strong></p>
+<ul>
+<li>Store feature names with models</li>
+<li>Store feature extraction order</li>
+<li>Version models with feature count in filename</li>
+</ul>
+</li>
+<li>
+<p><strong>Add validation</strong></p>
+<ul>
+<li>Consumer checks feature count on startup</li>
+<li>Fails fast if mismatch detected</li>
+<li>Logs expected vs actual features</li>
+</ul>
+</li>
+</ol>
+<h2 id="%F0%9F%93%8B-files-needing-updates">📋 Files Needing Updates</h2>
+<h3 id="immediate-fix">Immediate Fix:</h3>
+<ul>
+<li><code>dpdk_suricata_ml_pipeline/src/realtime_ensemble_consumer.py</code>
+<ul>
+<li>Add MODEL_FEATURES list (69 features)</li>
+<li>Add select_model_features() function</li>
+<li>Use selected features instead of all 77</li>
+</ul>
+</li>
+</ul>
+<h3 id="long-term-fix">Long-term Fix:</h3>
+<ul>
+<li>
+<p><code>retrain_models_raw_features.py</code></p>
+<ul>
+<li>Save feature names with models</li>
+<li>Option to skip zero-variance removal</li>
+<li>Save feature extraction order</li>
+</ul>
+</li>
+<li>
+<p><code>realtime_feature_engine.py</code></p>
+<ul>
+<li>Match exact CSV feature names (already does via FEATURE_MAPPING)</li>
+<li>Skip zero-variance features if needed</li>
+</ul>
+</li>
+</ul>
+<h2 id="%F0%9F%94%A7-next-steps">🔧 Next Steps</h2>
+<p>Choose one:</p>
+<p><strong>A. Quick Fix (10 minutes)</strong></p>
+<pre class="hljs"><code><div><span class="hljs-comment"># 1. Extract the 69 feature names from training</span>
+python3 extract_training_features.py
+
+<span class="hljs-comment"># 2. Update consumer with feature selector</span>
+<span class="hljs-comment"># (manually edit realtime_ensemble_consumer.py)</span>
+
+<span class="hljs-comment"># 3. Restart consumer</span>
+sudo ./run_realtime_engine.sh restart
+</div></code></pre>
+<p><strong>B. Proper Fix (30 minutes)</strong></p>
+<pre class="hljs"><code><div><span class="hljs-comment"># 1. Update training script to save 77-feature models</span>
+<span class="hljs-comment"># (edit retrain_models_raw_features.py)</span>
+
+<span class="hljs-comment"># 2. Retrain all models</span>
+python3 retrain_models_raw_features.py  <span class="hljs-comment"># ~3 min</span>
+
+<span class="hljs-comment"># 3. Update consumer to load new models</span>
+<span class="hljs-comment"># (already done - just needs restart)</span>
+
+<span class="hljs-comment"># 4. Restart consumer</span>
+sudo ./run_realtime_engine.sh restart
+</div></code></pre>
+<p><strong>Which do you prefer?</strong></p>
+<hr>
+<h2 id="%F0%9F%93%8A-feature-count-breakdown">📊 Feature Count Breakdown</h2>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Count</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CSV Original</td>
+<td>79</td>
+<td>Includes Label column</td>
+</tr>
+<tr>
+<td>After Drop Label</td>
+<td>78</td>
+<td>-</td>
+</tr>
+<tr>
+<td>After Strip Whitespace</td>
+<td>78</td>
+<td>No duplicates from whitespace</td>
+</tr>
+<tr>
+<td>After Drop Zero-Variance</td>
+<td>66</td>
+<td>Drops 12 zero-variance columns</td>
+</tr>
+<tr>
+<td>After Drop Fwd Header Length.1</td>
+<td>65</td>
+<td>Duplicate column</td>
+</tr>
+<tr>
+<td><strong>After Training Balance</strong></td>
+<td><strong>69</strong></td>
+<td>❓ WHERE DO 4 FEATURES COME FROM?</td>
+</tr>
+<tr>
+<td>Engine Extracts</td>
+<td>77</td>
+<td>-</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Mystery:</strong> Training preprocessed to 66, but models trained on 69. Need to trace where 3 extra features appear!</p>
+<p>Possible: SMOTE creates synthetic features? Or training script adds derived features?</p>
+<hr>
+<h2 id="%F0%9F%92%A1-debugging-commands">💡 Debugging Commands</h2>
+<pre class="hljs"><code><div><span class="hljs-comment"># Check model feature count</span>
+python3 -c <span class="hljs-string">"import joblib; m=joblib.load('ML Models/random_forest_model_2017_raw.joblib'); print(m.n_features_in_)"</span>
+
+<span class="hljs-comment"># Check scaler feature count  </span>
+python3 -c <span class="hljs-string">"import joblib; s=joblib.load('ML Models/scaler_2017_raw.joblib'); print(s.n_features_in_)"</span>
+
+<span class="hljs-comment"># Check engine feature count from Kafka</span>
+timeout 3 kafka-console-consumer --bootstrap-server localhost:9092 --topic ml-features --max-messages 1 | jq <span class="hljs-string">'.features | length'</span>
+
+<span class="hljs-comment"># Compare feature lists</span>
+diff /tmp/training_features.txt /tmp/engine_features.txt
+</div></code></pre>
+
+</body>
+
+</html>

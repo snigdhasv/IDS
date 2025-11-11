@@ -61,7 +61,14 @@ fi
 echo -e "${GREEN}✓ DPDK interface bound${NC}"
 
 # Check Kafka is running
-if ! netstat -tuln 2>/dev/null | grep -q ":9092"; then
+# Use ss if netstat is not available
+if command -v netstat &> /dev/null; then
+    KAFKA_RUNNING=$(netstat -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
+else
+    KAFKA_RUNNING=$(ss -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
+fi
+
+if [ "$KAFKA_RUNNING" != "yes" ]; then
     echo -e "${YELLOW}⚠️  Kafka not running${NC}"
     read -p "Start Kafka now? (y/N): " -n 1 -r
     echo

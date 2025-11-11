@@ -8,7 +8,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 SRC_DIR="$PROJECT_ROOT/src"
-MODEL_DIR="/home/sujay/Programming/IDS/ML Models"
+MODEL_DIR="/home/s-ujay/Programming/IDS/ML Models"
 
 # Colors
 GREEN='\033[0;32m'

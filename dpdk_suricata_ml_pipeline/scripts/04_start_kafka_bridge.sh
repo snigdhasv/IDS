@@ -35,7 +35,14 @@ fi
 echo -e "${GREEN}✓ Suricata is running${NC}"
 
 # Check if Kafka is running
-if ! netstat -tuln 2>/dev/null | grep -q ":9092"; then
+# Use ss if netstat is not available
+if command -v netstat &> /dev/null; then
+    KAFKA_CHECK=$(netstat -tuln 2>/dev/null | grep -q ":9092" && echo "running" || echo "not running")
+else
+    KAFKA_CHECK=$(ss -tuln 2>/dev/null | grep -q ":9092" && echo "running" || echo "not running")
+fi
+
+if [ "$KAFKA_CHECK" != "running" ]; then
     echo -e "${RED}❌ Kafka not running on port 9092${NC}"
     echo "Start Kafka first: ./02_setup_kafka.sh"
     exit 1
@@ -59,6 +66,7 @@ fi
 # Activate virtual environment
 if [ ! -d "$VENV_PATH" ]; then
     echo -e "${RED}❌ Virtual environment not found: $VENV_PATH${NC}"
+    echo -e "${YELLOW}Create it with: python3 -m venv $VENV_PATH${NC}"
     exit 1
 fi
 

@@ -42,7 +42,14 @@ echo
 # Check Kafka
 echo -e "${BOLD}${CYAN}▶ Kafka Status${NC}"
 echo -e "${CYAN}$(printf '─%.0s' {1..50})${NC}"
-if netstat -tuln 2>/dev/null | grep -q ":9092"; then
+# Use ss if netstat is not available
+if command -v netstat &> /dev/null; then
+    KAFKA_RUNNING=$(netstat -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
+else
+    KAFKA_RUNNING=$(ss -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
+fi
+
+if [ "$KAFKA_RUNNING" = "yes" ]; then
     echo -e "${GREEN}✓ Kafka running on port 9092${NC}"
     
     # Check topics
@@ -116,7 +123,12 @@ COMPONENTS_TOTAL=4
 
 # Count running components
 if [ "$DPDK_DEVICES" -gt 0 ]; then ((COMPONENTS_UP++)); fi
-if netstat -tuln 2>/dev/null | grep -q ":9092"; then ((COMPONENTS_UP++)); fi
+# Use ss if netstat is not available
+if command -v netstat &> /dev/null; then
+    if netstat -tuln 2>/dev/null | grep -q ":9092"; then ((COMPONENTS_UP++)); fi
+else
+    if ss -tuln 2>/dev/null | grep -q ":9092"; then ((COMPONENTS_UP++)); fi
+fi
 if pgrep -x "suricata" > /dev/null; then ((COMPONENTS_UP++)); fi
 if pgrep -f "ml_kafka_consumer.py" > /dev/null; then ((COMPONENTS_UP++)); fi
 

@@ -425,6 +425,20 @@ setup_external_capture() {
     bash "${PIPELINE_SCRIPTS}/00_setup_external_capture.sh"
 }
 
+cleanup_kafka() {
+    echo -e "\n${BOLD}${CYAN}═══ Kafka/Zookeeper Cleanup ═══${NC}\n"
+    echo -e "${YELLOW}This will stop Kafka/Zookeeper and clean all data${NC}"
+    echo -e "${RED}All topics and messages will be deleted!${NC}\n"
+    read -p "Continue? [y/N]: " confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        bash "${PIPELINE_SCRIPTS}/cleanup_kafka.sh"
+        echo -e "\n${GREEN}✓ Cleanup complete${NC}"
+    else
+        echo -e "${YELLOW}Cleanup cancelled${NC}"
+    fi
+}
+
 show_menu() {
     echo -e "\n${BOLD}${MAGENTA}═══════════════════ MENU ═══════════════════${NC}"
     echo -e "  ${GREEN}1${NC}) ${BOLD}Start Complete Pipeline${NC} (Kafka + Suricata + ML)"
@@ -438,6 +452,7 @@ show_menu() {
     echo -e "  ${GREEN}9${NC}) View Logs"
     echo -e "  ${GREEN}10${NC}) Setup External Capture 🌐"
     echo -e "  ${GREEN}11${NC}) Stop All Services"
+    echo -e "  ${GREEN}12${NC}) Cleanup Kafka/Zookeeper 🧹"
     echo -e "  ${RED}0${NC}) Exit"
     echo -e "${BOLD}${MAGENTA}═══════════════════════════════════════════${NC}\n"
 }
@@ -519,6 +534,9 @@ main() {
             stop|11)
                 stop_all
                 ;;
+            cleanup|12)
+                bash "${PIPELINE_SCRIPTS}/cleanup_kafka.sh"
+                ;;
             *)
                 echo -e "${RED}Invalid option${NC}"
                 exit 1
@@ -530,7 +548,7 @@ main() {
     # Interactive menu
     while true; do
         show_menu
-        read -p "Enter choice [0-11]: " choice
+        read -p "Enter choice [0-12]: " choice
         
         case $choice in
             1)
@@ -591,12 +609,15 @@ main() {
             11)
                 stop_all
                 ;;
+            12)
+                cleanup_kafka
+                ;;
             0)
                 echo -e "\n${CYAN}Exiting...${NC}"
                 exit 0
                 ;;
             *)
-                echo -e "${RED}Invalid choice. Please enter 0-11${NC}"
+                echo -e "${RED}Invalid choice. Please enter 0-12${NC}"
                 ;;
         esac
         
