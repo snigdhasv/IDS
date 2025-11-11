@@ -188,3 +188,6 @@ cython_debug/
 !/config/
 config/*local*
 config/*production*
+
+# Exclude large CSV datasets
+*.csv
