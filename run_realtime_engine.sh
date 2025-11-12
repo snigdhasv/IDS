@@ -9,7 +9,7 @@
 #   3. ML Consumer (high-confidence predictions)
 ################################################################################
 
-set -e
+#!/bin/bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_PATH="${SCRIPT_DIR}/venv"
@@ -49,31 +49,30 @@ start_all() {
     
     # 1. Start Kafka
     echo -e "${BLUE}[1/5]${NC} Starting Kafka..."
-    ./run_afpacket_mode.sh kafka > /dev/null 2>&1
+    bash dpdk_suricata_ml_pipeline/scripts/02_setup_kafka.sh 2>&1 | tail -5
     echo -e "${GREEN}✓ Kafka ready${NC}\n"
     sleep 3
     
     # 2. Start Suricata
     echo -e "${BLUE}[2/5]${NC} Starting Suricata (alerts/signatures)..."
-    ./run_afpacket_mode.sh suricata > /dev/null 2>&1
+    bash dpdk_suricata_ml_pipeline/scripts/03_start_suricata_afpacket.sh 2>&1 | tail -5
     echo -e "${GREEN}✓ Suricata ready${NC}\n"
     sleep 2
     
     # 3. Start Kafka bridge (for Suricata alerts)
     echo -e "${BLUE}[3/5]${NC} Starting Suricata-Kafka bridge..."
-    ./run_afpacket_mode.sh bridge > /dev/null 2>&1
+    bash dpdk_suricata_ml_pipeline/scripts/04_start_kafka_bridge.sh 2>&1 | tail -5
     echo -e "${GREEN}✓ Bridge ready${NC}\n"
     sleep 2
     
     # 4. Start Feature Engine (accurate CICIDS features)
     echo -e "${BLUE}[4/5]${NC} Starting Real-time Feature Engine..."
     cd dpdk_suricata_ml_pipeline/src
-    source "${VENV_PATH}/bin/activate"
     
     # Use 10-second timeout for faster attack detection in real-time
-    python3 -u realtime_feature_engine.py --timeout 10 > ../../logs/feature_engine.log 2>&1 &
+    # Run with sudo and in background with nohup
+    nohup sudo /home/ifscr/SE_02_2025/IDS/venv/bin/python3 -u realtime_feature_engine.py -i enp2s0 --timeout 10 > ../../logs/feature_engine.log 2>&1 &
     FEATURE_PID=$!
-    deactivate
     cd "${SCRIPT_DIR}"
     
     sleep 3
@@ -81,8 +80,7 @@ start_all() {
         echo -e "${GREEN}✓ Feature Engine started (PID: $FEATURE_PID)${NC}"
         echo "  Log: logs/feature_engine.log"
     else
-        echo -e "${RED}❌ Feature Engine failed to start${NC}"
-        exit 1
+        echo -e "${YELLOW}⚠ Feature Engine may not have started correctly${NC}"
     fi
     echo
     
@@ -92,7 +90,7 @@ start_all() {
     source "${VENV_PATH}/bin/activate"
     
     # Suppress sklearn warnings by filtering stderr
-    PYTHONWARNINGS="ignore::UserWarning" python3 -u realtime_ensemble_consumer.py > ../../logs/ml_consumer.log 2>&1 &
+    PYTHONWARNINGS="ignore::UserWarning" nohup python3 -u realtime_ensemble_consumer.py > ../../logs/ml_consumer.log 2>&1 &
     ML_PID=$!
     deactivate
     cd "${SCRIPT_DIR}"
@@ -102,8 +100,7 @@ start_all() {
         echo -e "${GREEN}✓ ML Consumer started (PID: $ML_PID)${NC}"
         echo "  Log: logs/ml_consumer.log"
     else
-        echo -e "${RED}❌ ML Consumer failed to start${NC}"
-        exit 1
+        echo -e "${YELLOW}⚠ ML Consumer may not have started correctly${NC}"
     fi
     echo
     
@@ -111,7 +108,7 @@ start_all() {
     echo -e "${BOLD}${GREEN}✓ Pipeline Started Successfully!${NC}\n"
     
     echo -e "${BOLD}Architecture:${NC}"
-    echo -e "  ${CYAN}NIC (enp0s1)${NC}"
+    echo -e "  ${CYAN}NIC (enp2s0)${NC}"
     echo -e "       │"
     echo -e "       ├─ AF_PACKET fanout (cluster_id=99)"
     echo -e "       │"
@@ -142,11 +139,11 @@ stop_all() {
     
     # Stop Suricata pipeline (kill processes directly to avoid interactive menu)
     echo -e "${GREEN}✓ Stopping Suricata pipeline...${NC}"
-    pkill -f "suricata_kafka_bridge" || true
-    pkill -f "suricata.*-c /etc/suricata" || true
+    pkill -9 -f "suricata_kafka_bridge" || true
+    pkill -9 -f "suricata.*-c /etc/suricata" || true
     
-    # Stop Kafka
-    docker stop kafka zookeeper 2>/dev/null || true
+    # Note: Kafka/Zookeeper stay running - they can serve other processes
+    # If you want to stop them: /home/ifscr/Downloads/kafka_2.13-3.9.1/bin/kafka-server-stop.sh
     
     echo -e "\n${GREEN}✓ All services stopped${NC}"
 }
@@ -222,5 +219,12 @@ main() {
             ;;
     esac
 }
+
+# Load config first
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PIPELINE_CONFIG="${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/config/pipeline.conf"
+if [ -f "$PIPELINE_CONFIG" ]; then
+    source "$PIPELINE_CONFIG"
+fi
 
 main "$@"

@@ -1,0 +1,194 @@
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                   DPDK IDS TESTING WORKFLOW - COMPLETE SETUP                  ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: Configuration & Verification                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  ✓ X520 NIC detected at PCI 0000:01:00.0                                    │
+│  ✓ Bound to DPDK (uio_pci_generic driver)                                   │
+│  ✓ DPDK 23.11.0 installed and functional                                    │
+│  ✓ Suricata 7.0.11 with DPDK support                                        │
+│  ✓ Kafka 3.x running on port 9092                                           │
+│                                                                               │
+│  Command: bash dpdk_suricata_ml_pipeline/scripts/04_configure_dpdk_input.sh │
+│                                                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                        ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: Start IDS Pipeline                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  Services Started:                                                            │
+│  ├─ Kafka (port 9092)                                    [Ready]             │
+│  ├─ Suricata DPDK (Signature detection)                  [Ready]             │
+│  ├─ Feature Engine (CICIDS65 features)                   [Ready]             │
+│  ├─ ML Consumer (Ensemble predictions)                   [Ready]             │
+│  └─ Metrics Dashboard (optional, port 5000)              [Optional]          │
+│                                                                               │
+│  Command: sudo bash run_realtime_engine_dpdk.sh start                       │
+│                                                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                        ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 3: Replay PCAP Traffic                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  PCAP File                                                                    │
+│      ↓                                                                        │
+│  ┌──────────────────────┐                                                    │
+│  │ dpdk_pcap_replay.py  │  Reads packets from PCAP                           │
+│  │                      │  Injects via X520 NIC (DPDK mode)                  │
+│  │ • Rate limiting      │  Captures ground truth to CSV                      │
+│  │ • Batch processing   │  Progress tracking & statistics                    │
+│  │ • CSV export         │                                                    │
+│  └──────────────────────┘                                                    │
+│      ↓                                                                        │
+│  X520 Network Interface Card (10 GbE)                                        │
+│  └─ DPDK PMD (kernel bypass, zero-copy)                                      │
+│                                                                               │
+│  Example Command:                                                             │
+│  python3 dpdk_pcap_replay.py traffic.pcap --csv ground_truth.csv             │
+│                                                                               │
+│  Output Files:                                                                │
+│  • ground_truth.csv  (packet metadata)                                       │
+│  • replay statistics (console output)                                        │
+│                                                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                        ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 4: IDS Processing (Automatic)                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  X520 RX → Suricata DPDK → Feature Engine → Kafka Topics                   │
+│                                                                               │
+│  ┌──────────────────┐       ┌──────────────────┐                            │
+│  │   Suricata       │       │ Feature Engine   │                            │
+│  │   ─────────────  │       │ ──────────────── │                            │
+│  │ • Sig detection  │──────→│ • Flow analysis  │                            │
+│  │ • Rule matching  │       │ • CICIDS features│                            │
+│  │ • Alert gen      │       │ • Normalization  │                            │
+│  └──────────────────┘       └──────────────────┘                            │
+│           ↓                           ↓                                      │
+│      Kafka Topics:                                                            │
+│      ├─ suricata-alerts       (Signature alerts)                             │
+│      └─ ml-features           (65-dim feature vectors)                       │
+│                                        ↓                                      │
+│                           ┌──────────────────────┐                            │
+│                           │  ML Consumer         │                            │
+│                           │  ──────────────────  │                            │
+│                           │ • Random Forest      │                            │
+│                           │ • Ensemble voting    │                            │
+│                           │ • Confidence scoring │                            │
+│                           └──────────────────────┘                            │
+│                                        ↓                                      │
+│                           Kafka Topic: ml-predictions                         │
+│                           (BENIGN/ATTACK + confidence)                       │
+│                                                                               │
+│  Logs:                                                                        │
+│  • logs/feature_engine.log      (feature extraction debug)                   │
+│  • logs/ml_consumer.log         (predictions with confidence)                │
+│                                                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                        ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 5: Accuracy Calculation                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  Ground Truth (from PCAP)              Predictions (from ML Consumer)        │
+│  ─────────────────────────────         ──────────────────────────────        │
+│  ground_truth.csv                      ml_consumer.log                       │
+│  • Timestamp                           • Timestamp                           │
+│  • Source/Dest IP                      • Prediction (BENIGN/ATTACK)         │
+│  • Source/Dest Port                    • Confidence score                    │
+│  • Packet size                         • Flow metadata                       │
+│  • Protocol                                                                  │
+│           │                                    │                             │
+│           └────────────┬───────────────────────┘                             │
+│                        ↓                                                     │
+│          ┌──────────────────────────────────┐                                │
+│          │ calculate_accuracy_metrics.py    │                                │
+│          │                                  │                                │
+│          │ • Match predictions to ground truth                               │
+│          │ • Calculate metrics:                                              │
+│          │   - Accuracy (overall)                                            │
+│          │   - Precision (false alarms)                                      │
+│          │   - Recall (detection rate)                                       │
+│          │   - F1-Score (balanced metric)                                    │
+│          │ • Generate confusion matrix                                       │
+│          │ • Analyze confidence distribution                                 │
+│          └──────────────────────────────────┘                                │
+│                        ↓                                                     │
+│          Output Files:                                                        │
+│          • accuracy_report.json           (metrics in JSON)                  │
+│          • predictions_detailed.csv       (per-packet analysis)              │
+│          • Console report                 (human-readable output)            │
+│                                                                               │
+│  Example Command:                                                             │
+│  python3 calculate_accuracy_metrics.py \\                                    │
+│    --packets ground_truth.csv \\                                             │
+│    --predictions logs/ml_consumer.log \\                                     │
+│    --output accuracy_report.json \\                                          │
+│    --detailed predictions_detailed.csv                                       │
+│                                                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                           METRICS OUTPUT EXAMPLE                              ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║                                                                               ║
+║  OVERALL ACCURACY:           97.45%                                          ║
+║                                                                               ║
+║  BENIGN CLASS:               ATTACK CLASS:                                   ║
+║  • Precision:   99.29%       • Precision:   94.46%                          ║
+║  • Recall:      97.86%       • Recall:      97.33%                          ║
+║  • F1-Score:    98.56%       • F1-Score:    95.88%                          ║
+║                                                                               ║
+║  CONFUSION MATRIX:                                                            ║
+║                      Predicted BENIGN    Predicted ATTACK                    ║
+║  Actual BENIGN           6850                  150            ← False Alarms ║
+║  Actual ATTACK            80                  2920            ← Missed Attacks║
+║                                                                               ║
+║  CONFIDENCE STATS:                                                            ║
+║  • Mean:   0.9234          (High confidence in predictions)                  ║
+║  • Min:    0.5102          (Some uncertain cases)                            ║
+║  • Max:    0.9998          (Very certain cases)                              ║
+║                                                                               ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ QUICK COMMAND REFERENCE                                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│ ① Configure:   bash dpdk_suricata_ml_pipeline/scripts/04_configure_dpdk_input.sh
+│                                                                               │
+│ ② Start:       sudo bash run_realtime_engine_dpdk.sh start                  │
+│                                                                               │
+│ ③ Replay:      python3 dpdk_pcap_replay.py traffic.pcap --csv ground_truth.csv
+│                                                                               │
+│ ④ Measure:     python3 calculate_accuracy_metrics.py \                      │
+│                  --packets ground_truth.csv \                               │
+│                  --predictions logs/ml_consumer.log \                       │
+│                  --output accuracy.json                                      │
+│                                                                               │
+│ ⑤ View:        cat accuracy.json | jq .overall.accuracy                     │
+│                                                                               │
+│ ⑥ Stop:        sudo bash run_realtime_engine_dpdk.sh stop                   │
+│                                                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ MONITORING COMMANDS                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│ Watch Feature Engine:     tail -f logs/feature_engine.log                    │
+│ Watch Predictions:        tail -f logs/ml_consumer.log                       │
+│ Watch Suricata:           tail -f /var/log/suricata/suricata.log             │
+│ Check Kafka topics:       kafka-topics.sh --list --bootstrap-server localhost:9092
+│ View Kafka messages:      kafka-console-consumer.sh --topic ml-predictions \│
+│                            --bootstrap-server localhost:9092                 │
+│ Pipeline status:          sudo bash run_realtime_engine_dpdk.sh status       │
+│ DPDK binding:             sudo dpdk-devbind.py --status                      │
+│                                                                               │
+└─────────────────────────────────────────────────────────────────────────────┘

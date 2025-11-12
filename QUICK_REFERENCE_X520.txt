@@ -1,0 +1,227 @@
+# Quick Reference: X520 DPDK Testing Commands
+
+## One-Time Setup (When X520 Arrives)
+
+```bash
+# 1. Check if X520 recognized
+lspci | grep -i "ixgbe\|Intel.*Ethernet"
+
+# 2. Load ixgbe driver
+sudo modprobe ixgbe
+
+# 3. Load DPDK UIO driver
+sudo insmod /lib/modules/$(uname -r)/kernel/drivers/uio/igb_uio.ko
+
+# 4. Bind X520 to DPDK (replace PCI address as needed)
+sudo dpdk-devbind.py -b igb_uio 0000:02:00.0
+
+# 5. Verify binding
+sudo dpdk-devbind.py --status
+```
+
+---
+
+## Standard Testing Workflow
+
+### Terminal 1: Start Pipeline
+```bash
+cd /home/ifscr/SE_02_2025/IDS
+sudo bash run_realtime_engine_dpdk.sh start
+```
+
+### Terminal 2: Start ML Consumer with CSV Logging
+```bash
+cd /home/ifscr/SE_02_2025/IDS
+source venv/bin/activate
+python3 dpdk_suricata_ml_pipeline/src/realtime_ensemble_consumer_with_csv.py \
+    --csv-output predictions.csv
+```
+
+### Terminal 3: Replay PCAP with Ground Truth
+```bash
+cd /home/ifscr/SE_02_2025/IDS
+source venv/bin/activate
+python3 dpdk_suricata_ml_pipeline/src/replay_pcap_for_testing.py \
+    --pcap-file dataset.pcap \
+    --ground-truth groundtruth.csv \
+    --max-packets 50000
+```
+
+### Terminal 4: Monitor Progress
+```bash
+# In real-time while replay is running
+tail -f /home/ifscr/SE_02_2025/IDS/logs/ml_consumer.log | grep "Processed:"
+```
+
+### Terminal 5: Calculate Metrics (After Replay Completes)
+```bash
+cd /home/ifscr/SE_02_2025/IDS
+source venv/bin/activate
+python3 dpdk_suricata_ml_pipeline/src/calculate_accuracy_metrics.py \
+    --predictions predictions.csv \
+    --output metrics.json \
+    --confusion-matrix confusion.png
+```
+
+---
+
+## Common Variations
+
+### Fast Replay (10x speed)
+```bash
+python3 dpdk_suricata_ml_pipeline/src/replay_pcap_for_testing.py \
+    --pcap-file dataset.pcap \
+    --ground-truth groundtruth.csv \
+    --speed 10.0
+```
+
+### Real-Time Replay (Preserves Packet Timing)
+```bash
+python3 dpdk_suricata_ml_pipeline/src/replay_pcap_for_testing.py \
+    --pcap-file dataset.pcap \
+    --ground-truth groundtruth.csv \
+    --real-time
+```
+
+### Quick Test (First 10K Packets)
+```bash
+python3 dpdk_suricata_ml_pipeline/src/replay_pcap_for_testing.py \
+    --pcap-file dataset.pcap \
+    --ground-truth groundtruth.csv \
+    --max-packets 10000
+```
+
+### Just View Current Metrics (Without Replay)
+```bash
+python3 dpdk_suricata_ml_pipeline/src/calculate_accuracy_metrics.py \
+    --predictions predictions.csv
+```
+
+---
+
+## Monitoring Commands
+
+```bash
+# Watch feature engine
+tail -f logs/feature_engine.log
+
+# Watch ML predictions
+tail -f logs/ml_consumer.log
+
+# Watch Suricata DPDK
+tail -f /var/log/suricata/suricata.log
+
+# Check Kafka
+netstat -tuln | grep 9092
+
+# Check DPDK binding
+sudo dpdk-devbind.py --status
+
+# Check pipeline status
+sudo bash run_realtime_engine_dpdk.sh status
+
+# Monitor PCAP replay progress (live)
+ps aux | grep replay_pcap
+```
+
+---
+
+## Stop Everything
+
+```bash
+# Stop pipeline (interactive, asks about Kafka/DPDK)
+sudo bash run_realtime_engine_dpdk.sh stop
+
+# Or kill everything manually
+pkill -9 -f "suricata.*--dpdk"
+pkill -9 -f "realtime_feature_engine"
+pkill -9 -f "realtime_ensemble_consumer"
+pkill -9 -f "replay_pcap"
+```
+
+---
+
+## File Locations
+
+```
+/home/ifscr/SE_02_2025/IDS/
+├── X520_DPDK_SETUP.md                          ← Full X520 setup guide
+├── PCAP_REPLAY_ACCURACY_GUIDE.md               ← Detailed workflow
+├── X520_TESTING_SUMMARY.md                     ← This complete overview
+│
+├── dpdk_suricata_ml_pipeline/src/
+│   ├── realtime_ensemble_consumer_with_csv.py
+│   ├── replay_pcap_for_testing.py
+│   └── calculate_accuracy_metrics.py
+│
+├── logs/
+│   ├── feature_engine.log
+│   ├── ml_consumer.log
+│   └── metrics_dashboard.log
+│
+├── predictions.csv                             ← Generated after replay
+├── metrics.json                                ← Generated after calculation
+└── confusion.png                               ← Generated after calculation
+```
+
+---
+
+## Expected Results
+
+✅ **Accuracy**: 95-99% on CICIDS datasets  
+✅ **High Confidence**: >95% of predictions at >80% model agreement  
+✅ **Throughput**: 1-10 Gbps depending on feature complexity  
+✅ **Latency**: <100 ms end-to-end  
+
+---
+
+## Help Commands
+
+```bash
+# Get help for each script
+python3 dpdk_suricata_ml_pipeline/src/realtime_ensemble_consumer_with_csv.py --help
+python3 dpdk_suricata_ml_pipeline/src/replay_pcap_for_testing.py --help
+python3 dpdk_suricata_ml_pipeline/src/calculate_accuracy_metrics.py --help
+
+# Check Suricata DPDK support
+suricata --build-info | grep DPDK
+
+# Check DPDK version
+pkg-config --modversion libdpdk
+
+# Check pipeline config
+cat dpdk_suricata_ml_pipeline/config/pipeline.conf
+```
+
+---
+
+## Troubleshooting Quick Fixes
+
+```bash
+# DPDK binding failed
+sudo dpdk-devbind.py -b igb_uio 0000:02:00.0
+
+# Kafka not responding
+sudo bash dpdk_suricata_ml_pipeline/scripts/02_setup_kafka.sh
+
+# Reset everything
+sudo pkill -9 -f "kafka\|suricata\|realtime_\|replay_"
+sleep 3
+sudo bash run_realtime_engine_dpdk.sh start
+
+# Check logs for errors
+grep -i "error\|failed" logs/*.log
+
+# Get line count of predictions
+wc -l predictions.csv
+```
+
+---
+
+## Next: Read Full Guides
+
+- **Setup & Hardware**: X520_DPDK_SETUP.md
+- **Testing Workflow**: PCAP_REPLAY_ACCURACY_GUIDE.md
+- **Complete Overview**: X520_TESTING_SUMMARY.md
+
+**Ready to test! 🚀**

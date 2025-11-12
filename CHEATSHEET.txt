@@ -1,0 +1,295 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                  DPDK IDS Testing - Command Cheatsheet                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUICK START (Copy & Paste)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# 1. Configure DPDK
+bash dpdk_suricata_ml_pipeline/scripts/04_configure_dpdk_input.sh
+
+# 2. Start Pipeline
+sudo bash run_realtime_engine_dpdk.sh start
+
+# 3. Replay PCAP
+python3 dpdk_pcap_replay.py \
+  dpdk_suricata_ml_pipeline/pcap_samples/mixed_traffic_sample.pcap \
+  --csv results/ground_truth.csv
+
+# 4. Monitor (in another terminal)
+tail -f logs/ml_consumer.log
+
+# 5. Calculate Accuracy
+python3 calculate_accuracy_metrics.py \
+  --packets results/ground_truth.csv \
+  --predictions logs/ml_consumer.log \
+  --output results/accuracy.json
+
+# 6. View Results
+cat results/accuracy.json | jq .overall.accuracy
+
+# 7. Stop Pipeline
+sudo bash run_realtime_engine_dpdk.sh stop
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PIPELINE MANAGEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Start:                  sudo bash run_realtime_engine_dpdk.sh start
+Stop:                   sudo bash run_realtime_engine_dpdk.sh stop
+Status:                 sudo bash run_realtime_engine_dpdk.sh status
+Restart:                sudo bash run_realtime_engine_dpdk.sh restart
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PCAP REPLAY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Basic replay:           python3 dpdk_pcap_replay.py traffic.pcap
+
+With CSV export:        python3 dpdk_pcap_replay.py traffic.pcap \
+                          --csv ground_truth.csv
+
+Rate limited:           python3 dpdk_pcap_replay.py traffic.pcap \
+                          --rate 100000
+
+Multiple passes:        python3 dpdk_pcap_replay.py traffic.pcap \
+                          --repeat 5
+
+DPDK mode:              python3 dpdk_pcap_replay.py traffic.pcap --dpdk
+
+Verbose output:         python3 dpdk_pcap_replay.py traffic.pcap -v
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ACCURACY METRICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Single file:            python3 calculate_accuracy_metrics.py \
+                          --packets ground_truth.csv \
+                          --predictions logs/ml_consumer.log
+
+Multiple files:         python3 calculate_accuracy_metrics.py \
+                          --packets test_results/*.csv \
+                          --predictions logs/ml_consumer.log
+
+Save JSON:              python3 calculate_accuracy_metrics.py \
+                          --packets *.csv \
+                          --predictions log.log \
+                          --output accuracy.json
+
+Save detailed CSV:      python3 calculate_accuracy_metrics.py \
+                          --packets *.csv \
+                          --predictions log.log \
+                          --detailed predictions.csv
+
+Combined:               python3 calculate_accuracy_metrics.py \
+                          --packets *.csv \
+                          --predictions log.log \
+                          --output acc.json \
+                          --detailed pred.csv
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MONITORING & DEBUGGING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Feature Engine:         tail -f logs/feature_engine.log
+ML Consumer:            tail -f logs/ml_consumer.log
+Suricata:               tail -f /var/log/suricata/suricata.log
+All logs:               tail -f logs/*.log
+Follow with grep:       tail -f logs/ml_consumer.log | grep "ATTACK"
+Last 50 lines:          tail -50 logs/ml_consumer.log
+Search logs:            grep "ATTACK" logs/ml_consumer.log
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DPDK & HARDWARE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Check DPDK binding:     sudo python3 /usr/local/bin/dpdk-devbind.py --status
+
+Bind X520 to DPDK:      sudo python3 /usr/local/bin/dpdk-devbind.py \
+                          --bind=uio_pci_generic 0000:01:00.0
+
+Unbind from DPDK:       sudo python3 /usr/local/bin/dpdk-devbind.py \
+                          --bind=ixgbe 0000:01:00.0
+
+List NICs:              lspci | grep -i "82599\|x520"
+
+Check DPDK version:     pkg-config --modversion libdpdk
+
+Check Suricata DPDK:    suricata --build-info | grep DPDK
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KAFKA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+List topics:            kafka-topics.sh --list \
+                          --bootstrap-server localhost:9092
+
+Describe topic:         kafka-topics.sh --describe \
+                          --bootstrap-server localhost:9092 \
+                          --topic ml-predictions
+
+Read messages:          kafka-console-consumer.sh \
+                          --topic ml-predictions \
+                          --bootstrap-server localhost:9092
+
+First 10 messages:      kafka-console-consumer.sh \
+                          --topic ml-predictions \
+                          --bootstrap-server localhost:9092 \
+                          --from-beginning | head -10
+
+Check Kafka running:    netstat -tuln | grep 9092
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILE OPERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+List PCAP samples:      ls dpdk_suricata_ml_pipeline/pcap_samples/
+
+Create results dir:     mkdir -p test_results
+
+Check output files:     ls -lh test_results/
+
+View JSON metrics:      cat accuracy.json | jq .
+View specific metric:   cat accuracy.json | jq '.overall.accuracy'
+Pretty print JSON:      cat accuracy.json | jq . | less
+
+View CSV (first 10):    head -10 ground_truth.csv
+View CSV (last 10):     tail -10 ground_truth.csv
+Count CSV lines:        wc -l predictions.csv
+Sort by accuracy:       sort -t',' -k3 -r predictions.csv
+
+Disk usage:             du -sh logs/ test_results/
+Compress results:       tar -czf results_backup.tar.gz test_results/
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TESTING SCENARIOS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Scenario 1 - Quick Test (5 min):
+  sudo bash run_realtime_engine_dpdk.sh start
+  python3 dpdk_pcap_replay.py normal_traffic.pcap --csv gt.csv
+  python3 calculate_accuracy_metrics.py --packets gt.csv --predictions logs/ml_consumer.log
+
+Scenario 2 - Full Test (30 min):
+  sudo bash test_dpdk_replay.sh start
+  python3 calculate_accuracy_metrics.py --packets test_results/*.csv --predictions test_results/ml_predictions.log
+
+Scenario 3 - Stress Test (1+ hour):
+  sudo bash run_realtime_engine_dpdk.sh start
+  python3 dpdk_pcap_replay.py mixed_traffic_sample.pcap --repeat 100 --rate 1000000 --csv stress.csv
+  python3 calculate_accuracy_metrics.py --packets stress.csv --predictions logs/ml_consumer.log
+
+Scenario 4 - Real-time Monitoring:
+  Terminal 1: sudo bash run_realtime_engine_dpdk.sh start
+  Terminal 2: tail -f logs/ml_consumer.log
+  Terminal 3: python3 dpdk_pcap_replay.py mixed_traffic_sample.pcap
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VERIFICATION CHECKLIST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+X520 detected:          lspci | grep -i "82599\|x520"
+X520 bound:             sudo dpdk-devbind.py --status
+DPDK version:           pkg-config --modversion libdpdk
+Suricata DPDK:          suricata --build-info | grep DPDK
+Kafka running:          netstat -tuln | grep 9092
+PCAP samples:           ls dpdk_suricata_ml_pipeline/pcap_samples/
+Python ready:           python3 -c "import scapy; print('OK')"
+Feature Engine:         ls dpdk_suricata_ml_pipeline/src/realtime_feature_engine.py
+ML Consumer:            ls dpdk_suricata_ml_pipeline/src/realtime_ensemble_consumer.py
+Scripts created:        ls dpdk_pcap_replay.py calculate_accuracy_metrics.py test_dpdk_replay.sh
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PERFORMANCE MONITORING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CPU usage:              top -b -n 1 | head -15
+Memory:                 free -h
+Disk:                   df -h
+Network interfaces:     ip link show
+Processes:              ps aux | grep -E "suricata|realtime|kafka"
+Open ports:             netstat -tuln | grep LISTEN
+I/O stats:              iostat -x 1 5
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TROUBLESHOOTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DPDK not bound:         sudo python3 /usr/local/bin/dpdk-devbind.py \
+                          --bind=uio_pci_generic 0000:01:00.0
+
+Kafka down:             bash dpdk_suricata_ml_pipeline/scripts/02_setup_kafka.sh
+
+No predictions:         tail -f logs/feature_engine.log
+                        tail -f logs/ml_consumer.log
+
+Check services:         sudo bash run_realtime_engine_dpdk.sh status
+
+Restart everything:     sudo bash run_realtime_engine_dpdk.sh stop
+                        sleep 3
+                        sudo bash run_realtime_engine_dpdk.sh start
+
+Clear old results:      rm -rf test_results/*
+                        rm -f logs/*.log
+
+Check permissions:      sudo ls -la logs/
+                        ls -la dpdk_pcap_replay.py
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ANALYSIS & VISUALIZATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+View accuracy:          cat accuracy.json | jq '.overall.accuracy * 100'
+View precision:         cat accuracy.json | jq '.attack_class.precision * 100'
+View recall:            cat accuracy.json | jq '.attack_class.recall * 100'
+View F1:                cat accuracy.json | jq '.attack_class.f1_score * 100'
+View confusion matrix:  cat accuracy.json | jq '.confusion_matrix'
+
+Show all metrics:       cat accuracy.json | jq .
+Pretty print:           cat accuracy.json | jq . | less
+Extract value:          cat accuracy.json | jq '.benign_class.precision'
+
+Count predictions:      grep "prediction=" logs/ml_consumer.log | wc -l
+Count attacks:          grep "prediction=ATTACK" logs/ml_consumer.log | wc -l
+Count benign:           grep "prediction=BENIGN" logs/ml_consumer.log | wc -l
+High confidence:        grep "confidence=0.9" logs/ml_consumer.log | wc -l
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOCUMENTATION QUICK LINKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Overview:               cat SETUP_COMPLETE.txt
+Quick Reference:       cat DPDK_TESTING_QUICK_REFERENCE.md | less
+Full Guide:            cat DPDK_PCAP_REPLAY_GUIDE.md | less
+Workflow Diagram:      cat TESTING_WORKFLOW.txt | less
+Implementation:        cat DPDK_IMPLEMENTATION_STATUS.md | less
+Resource List:         cat RESOURCES_CREATED.md | less
+Architecture:          cat DPDK_MODE_ARCHITECTURE.md | less
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COMMON ONE-LINERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Start + Replay + Measure (all 3 steps):
+  sudo bash run_realtime_engine_dpdk.sh start && \
+  python3 dpdk_pcap_replay.py mixed_traffic_sample.pcap --csv gt.csv && \
+  python3 calculate_accuracy_metrics.py --packets gt.csv --predictions logs/ml_consumer.log && \
+  cat accuracy.json | jq '.overall.accuracy * 100'
+
+Quick accuracy percentage:
+  python3 calculate_accuracy_metrics.py --packets gt.csv --predictions logs/ml_consumer.log | \
+  grep "Accuracy:" | awk '{print $NF}'
+
+Count test results:
+  wc -l test_results/*.csv | tail -1
+
+Show all JSON metrics on one line:
+  cat accuracy.json | jq '.overall'
+
+Monitor in real-time:
+  watch -n 1 'tail -5 logs/ml_consumer.log'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For more help, see: SETUP_COMPLETE.txt or DPDK_TESTING_QUICK_REFERENCE.md

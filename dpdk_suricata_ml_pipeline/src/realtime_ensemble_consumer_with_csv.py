@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 """
-Ensemble ML Consumer for Real-time Feature Engine
+Ensemble ML Consumer with CSV Logging for Accuracy Metrics
 
-Uses multiple models with voting for higher confidence predictions.
+Logs predictions with confidence scores to CSV for accuracy calculation:
+- Feature vector ID
+- Ground truth label (if available from PCAP metadata)
+- Ensemble prediction
+- Per-model predictions
+- Confidence scores
+- Timestamp
+
+Usage with PCAP replay:
+    python3 realtime_ensemble_consumer_with_csv.py --csv-output predictions.csv
 """
 
 import json
@@ -11,9 +20,11 @@ import sys
 import signal
 import warnings
 import os
+import csv
 from typing import Dict, List, Tuple
 from pathlib import Path
 from collections import Counter
+from datetime import datetime
 from kafka import KafkaConsumer
 from kafka.errors import KafkaError
 import numpy as np
@@ -45,7 +56,6 @@ ENSEMBLE_MODELS = [
 SCALER_PATH = "/home/ifscr/SE_02_2025/IDS/ML Models/scaler_2017_raw.joblib"
 
 # Model features - EXACT 67 features the models were trained on (after preprocessing)
-# These match the CSV columns after: strip whitespace, drop Label, drop zero-variance, drop duplicates
 MODEL_FEATURES = [
     'Destination Port', 'Flow Duration', 'Total Fwd Packets', 'Total Backward Packets',
     'Total Length of Fwd Packets', 'Total Length of Bwd Packets', 'Fwd Packet Length Max',
@@ -81,15 +91,26 @@ logging.getLogger('kafka.coordinator').setLevel(logging.ERROR)
 logging.getLogger('kafka.consumer').setLevel(logging.ERROR)
 logging.getLogger('model_loader').setLevel(logging.ERROR)
 
+# Label mapping
+LABEL_MAP = {
+    0: "BENIGN",
+    1: "Attack"
+}
+LABEL_MAP_REVERSE = {v: k for k, v in LABEL_MAP.items()}
 
-class EnsembleMLConsumer:
-    """Ensemble ML Consumer with voting for higher confidence"""
+
+class EnsembleMLConsumerWithCSV:
+    """Ensemble ML Consumer with CSV logging for accuracy metrics"""
     
-    def __init__(self, kafka_bootstrap: str, kafka_topic: str, model_paths: List[str]):
+    def __init__(self, kafka_bootstrap: str, kafka_topic: str, model_paths: List[str], 
+                 csv_output: str = None):
         self.kafka_bootstrap = kafka_bootstrap
         self.kafka_topic = kafka_topic
         self.model_paths = model_paths
         self.running = True
+        self.csv_output = csv_output
+        self.csv_writer = None
+        self.csv_file = None
         
         # Load all models
         self.models = []
@@ -134,6 +155,10 @@ class EnsembleMLConsumer:
             logger.error(f"Failed to connect to Kafka: {e}")
             raise
         
+        # Initialize CSV logging
+        if csv_output:
+            self._init_csv(csv_output)
+        
         # Statistics
         self.stats = {
             'total': 0,
@@ -142,11 +167,48 @@ class EnsembleMLConsumer:
             'high_confidence': 0,  # >80% agreement
             'medium_confidence': 0,  # 60-80% agreement
             'low_confidence': 0,  # <60% agreement
+            'correct': 0,  # Only if ground truth available
+            'incorrect': 0,
         }
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _init_csv(self, csv_path: str):
+        """Initialize CSV file for logging predictions"""
+        try:
+            self.csv_file = open(csv_path, 'w', newline='')
+            
+            # CSV columns
+            fieldnames = [
+                'timestamp',
+                'flow_id',
+                'ground_truth',
+                'ensemble_prediction',
+                'ensemble_confidence',
+                'agreement_ratio',
+                'model_rf_pred',
+                'model_rf_conf',
+                'model_dt_pred',
+                'model_dt_conf',
+                'model_lgb_pred',
+                'model_lgb_conf',
+                'model_knn_pred',
+                'model_knn_conf',
+                'model_lr_pred',
+                'model_lr_conf',
+                'correct'
+            ]
+            
+            self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=fieldnames)
+            self.csv_writer.writeheader()
+            self.csv_file.flush()
+            
+            logger.info(f"✓ CSV output initialized: {csv_path}")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize CSV: {e}")
+            self.csv_writer = None
     
     def _signal_handler(self, signum, frame):
         logger.info(f"Shutting down... (signal {signum})")
@@ -154,9 +216,11 @@ class EnsembleMLConsumer:
     
     def start(self):
         """Start consuming and processing messages"""
-        logger.info("🚀 Starting Ensemble ML Consumer")
+        logger.info("🚀 Starting Ensemble ML Consumer (with CSV logging)")
         logger.info(f"   Consuming from: {self.kafka_topic}")
         logger.info(f"   Ensemble size: {len(self.models)}")
+        if self.csv_output:
+            logger.info(f"   CSV output: {self.csv_output}")
         logger.info("")
         
         try:
@@ -178,6 +242,8 @@ class EnsembleMLConsumer:
         
         finally:
             self.consumer.close()
+            if self.csv_file:
+                self.csv_file.close()
             logger.info(f"✅ Consumer stopped. Final stats: {self.stats}")
     
     def _process_message(self, data: Dict):
@@ -187,18 +253,18 @@ class EnsembleMLConsumer:
             
             # Extract features dictionary from engine
             features_dict = data['features']
+            flow_id = data.get('flow_id', f"flow_{self.stats['total']}")
+            ground_truth = data.get('ground_truth', None)  # Optional: from PCAP metadata
             
             # DEBUG: Log first time
             if self.stats['total'] == 1:
                 logger.info(f"🔍 Engine sent {len(features_dict)} features, selecting {len(MODEL_FEATURES)} for models")
             
             # Select ONLY the 67 features that models were trained on
-            # Missing features default to 0 (shouldn't happen if engine is correct)
             selected_features = [features_dict.get(fname, 0.0) for fname in MODEL_FEATURES]
             
             # HACK: Models expect 69 features but we only have 67
             # Add 2 dummy features with value 0.0 to match
-            # TODO: Find the actual 2 missing features
             selected_features.extend([0.0, 0.0])
             
             # Build feature vector (69 features to match model expectation)
@@ -207,22 +273,13 @@ class EnsembleMLConsumer:
             # Handle inf/nan BEFORE scaling
             feature_vector = np.nan_to_num(feature_vector, nan=0.0, posinf=0.0, neginf=0.0)
             
-            # TEMPORARY: Skip scaling due to feature count mismatch (67 vs 69)
-            # Tree-based models (RF, DT) work fine without scaling
-            # TODO: Retrain models with exact 67 features OR identify the missing 2 features
-            # if self.scaler is not None:
-            #     try:
-            #         feature_vector = self.scaler.transform(feature_vector)
-            #     except Exception as e:
-            #         if self.stats['total'] == 1:
-            #             logger.warning(f"⚠️  Scaler failed: {e}. Continuing without scaling.")
-            #         pass
-            
             # Get predictions from all models
+            all_predictions = {}
             predictions = []
             confidences = []
             
             for model_info in self.models:
+                model_name = model_info['name']
                 try:
                     pred = model_info['loader'].predict(feature_vector)[0]
                     proba = model_info['loader'].predict_proba(feature_vector)[0]
@@ -230,9 +287,13 @@ class EnsembleMLConsumer:
                     
                     predictions.append(pred)
                     confidences.append(conf)
+                    all_predictions[model_name] = {
+                        'pred': LABEL_MAP.get(pred, str(pred)),
+                        'conf': float(conf)
+                    }
                 except Exception as e:
-                    # Always log failures
-                    logger.error(f"❌ Model {model_info['name']} prediction failed: {type(e).__name__}: {e}")
+                    logger.error(f"❌ Model {model_name} prediction failed: {type(e).__name__}: {e}")
+                    all_predictions[model_name] = {'pred': 'ERROR', 'conf': 0.0}
                     continue
             
             if not predictions:
@@ -249,109 +310,96 @@ class EnsembleMLConsumer:
                                    if pred == final_prediction]
             avg_confidence = np.mean(agreeing_confidences) if agreeing_confidences else 0.0
             
-            # Ensemble confidence: combines agreement and individual confidences
-            raw_ensemble_confidence = agreement * avg_confidence
-            
-            # CONFIDENCE SCALING: Boost confidence for display (60%+ → 90%+ range)
-            # This makes predictions look more decisive while keeping agreement honest
-            if raw_ensemble_confidence >= 0.60:
-                # Scale 60-100% → 90-99%
-                ensemble_confidence = 0.90 + (raw_ensemble_confidence - 0.60) * 0.225
-            elif raw_ensemble_confidence >= 0.40:
-                # Scale 40-60% → 75-90%
-                ensemble_confidence = 0.75 + (raw_ensemble_confidence - 0.40) * 0.75
-            else:
-                # Keep low confidence as-is (0-40% → 0-75%)
-                ensemble_confidence = raw_ensemble_confidence * 1.875
-            
-            # Cap at 99%
-            ensemble_confidence = min(ensemble_confidence, 0.99)
-            
-            # Get flow ID first
-            flow_id = data.get('flow_id', 'unknown')
-            
-            # CONFIDENCE THRESHOLD: Lower for CICIDS attack detection
-            # For attacks, require at least 60% agreement (3/5 models) AND 40%+ raw confidence
-            ATTACK_THRESHOLD_AGREEMENT = 0.6  # 3 out of 5 models must agree (was 0.8)
-            ATTACK_THRESHOLD_CONFIDENCE = 0.40  # 40% minimum scaled confidence (was 0.5)
-            
-            # If attack prediction doesn't meet threshold, reclassify as BENIGN
-            original_prediction = final_prediction
-            votes_detail = dict(vote_counts)  # Show all votes
-            
-            if final_prediction != 'BENIGN':
-                if agreement < ATTACK_THRESHOLD_AGREEMENT or ensemble_confidence < ATTACK_THRESHOLD_CONFIDENCE:
-                    logger.info(f"⚠️  Low-confidence {final_prediction} rejected "
-                               f"(conf: {ensemble_confidence:.1%}, agreement: {agreement:.1%}, votes: {votes_detail}) → "
-                               f"Reclassified as BENIGN: {flow_id}")
-                    final_prediction = 'BENIGN'
-                else:
-                    # Log successful attack detection with vote breakdown
-                    logger.info(f"🚨 {final_prediction} | "
-                               f"Confidence: {ensemble_confidence:.1%} | "
-                               f"Agreement: {agreement:.1%} ({vote_counts[final_prediction]}/{len(predictions)}) | "
-                               f"Votes: {votes_detail} | "
-                               f"Flow: {flow_id}")
-                    # Don't log again later
-                    final_prediction = f"_LOGGED_{final_prediction}"
-            
-            # Update stats (handle _LOGGED_ prefix)
-            actual_prediction = final_prediction.replace('_LOGGED_', '')
-            if actual_prediction == 'BENIGN':
-                self.stats['benign'] += 1
-            else:
-                self.stats['attacks'] += 1
-            
-            if agreement >= 0.8:
+            # Update confidence category
+            if agreement >= 0.80:
                 self.stats['high_confidence'] += 1
-            elif agreement >= 0.6:
+            elif agreement >= 0.60:
                 self.stats['medium_confidence'] += 1
             else:
                 self.stats['low_confidence'] += 1
             
-            # Show all votes for 192.168.10.x flows (CICIDS) for debugging
-            if '192.168.10' in flow_id and self.stats['total'] % 10 == 0:
-                logger.info(f"🔍 DEBUG 192.168.10.x | Votes: {votes_detail} | "
-                           f"Winner: {actual_prediction} ({agreement:.0%}) | "
-                           f"Conf: {ensemble_confidence:.1%} | Flow: {flow_id}")
+            # Count predictions
+            final_label = LABEL_MAP.get(final_prediction, "UNKNOWN")
+            if final_label == "BENIGN":
+                self.stats['benign'] += 1
+            elif final_label == "Attack":
+                self.stats['attacks'] += 1
             
-            # Only log if not already logged above
-            if final_prediction != 'BENIGN' and not final_prediction.startswith('_LOGGED_'):
-                logger.info(f"🚨 {final_prediction} | "
-                           f"Confidence: {ensemble_confidence:.1%} | "
-                           f"Agreement: {agreement:.1%} ({vote_counts[final_prediction]}/{len(predictions)}) | "
-                           f"Flow: {flow_id}")
-            else:
-                # Log first 10 BENIGN, then only attacks and high-confidence
-                if self.stats['total'] <= 10 or ensemble_confidence >= 0.85:
-                    logger.info(f"✓ BENIGN | "
-                               f"Confidence: {ensemble_confidence:.1%} | "
-                               f"Agreement: {agreement:.1%} ({vote_counts[final_prediction]}/{len(predictions)}) | "
-                               f"Flow: {flow_id}")
+            # Check accuracy (if ground truth available)
+            correct = None
+            if ground_truth is not None:
+                gt_label = LABEL_MAP.get(ground_truth) if isinstance(ground_truth, int) else ground_truth
+                correct = (final_label == gt_label)
+                if correct:
+                    self.stats['correct'] += 1
                 else:
-                    logger.debug(f"✓ BENIGN (confidence: {ensemble_confidence:.1%}) - {flow_id}")
+                    self.stats['incorrect'] += 1
+            
+            # Log prediction
+            log_msg = f"[{self.stats['total']:6d}] {final_label:8s} (conf: {avg_confidence:.2%}, agree: {agreement:.0%})"
+            if ground_truth is not None:
+                gt_label = LABEL_MAP.get(ground_truth) if isinstance(ground_truth, int) else ground_truth
+                accuracy_marker = "✓" if correct else "✗"
+                log_msg += f" | GT: {gt_label:8s} {accuracy_marker}"
+            logger.info(log_msg)
+            
+            # Write to CSV
+            if self.csv_writer:
+                try:
+                    csv_row = {
+                        'timestamp': datetime.now().isoformat(),
+                        'flow_id': flow_id,
+                        'ground_truth': LABEL_MAP.get(ground_truth, '') if ground_truth is not None else '',
+                        'ensemble_prediction': final_label,
+                        'ensemble_confidence': f"{avg_confidence:.4f}",
+                        'agreement_ratio': f"{agreement:.4f}",
+                        'correct': str(correct) if correct is not None else '',
+                    }
+                    
+                    # Add per-model predictions
+                    for i, model_info in enumerate(self.models):
+                        model_name = model_info['name']
+                        prefix = f"model_{model_name[:3].lower()}"
+                        if model_name in all_predictions:
+                            csv_row[f"{prefix}_pred"] = all_predictions[model_name]['pred']
+                            csv_row[f"{prefix}_conf"] = f"{all_predictions[model_name]['conf']:.4f}"
+                    
+                    self.csv_writer.writerow(csv_row)
+                    self.csv_file.flush()
+                except Exception as e:
+                    logger.error(f"❌ CSV write failed: {e}")
         
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
+            logger.error(f"❌ Error processing message: {e}")
 
 
 def main():
-    """Main entry point"""
     import argparse
     
-    parser = argparse.ArgumentParser(description='Ensemble ML Consumer for Real-time IDS')
-    parser.add_argument('--kafka-bootstrap', default=KAFKA_BOOTSTRAP, help='Kafka bootstrap servers')
-    parser.add_argument('--kafka-topic', default=KAFKA_TOPIC, help='Kafka topic to consume')
-    parser.add_argument('--models', nargs='+', default=ENSEMBLE_MODELS, help='Model paths for ensemble')
+    parser = argparse.ArgumentParser(description='Ensemble ML Consumer with CSV logging')
+    parser.add_argument('--csv-output', type=str, default=None,
+                       help='Output CSV file for predictions (default: disabled)')
+    parser.add_argument('--kafka-bootstrap', type=str, default=KAFKA_BOOTSTRAP,
+                       help='Kafka bootstrap servers (default: localhost:9092)')
+    parser.add_argument('--kafka-topic', type=str, default=KAFKA_TOPIC,
+                       help='Kafka topic to consume from (default: ml-features)')
     
     args = parser.parse_args()
     
+    # Create output dir if needed
+    if args.csv_output:
+        output_dir = Path(args.csv_output).parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Start consumer
+    consumer = EnsembleMLConsumerWithCSV(
+        kafka_bootstrap=args.kafka_bootstrap,
+        kafka_topic=args.kafka_topic,
+        model_paths=ENSEMBLE_MODELS,
+        csv_output=args.csv_output
+    )
+    
     try:
-        consumer = EnsembleMLConsumer(
-            kafka_bootstrap=args.kafka_bootstrap,
-            kafka_topic=args.kafka_topic,
-            model_paths=args.models
-        )
         consumer.start()
     except KeyboardInterrupt:
         logger.info("Interrupted by user")

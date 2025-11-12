@@ -33,7 +33,7 @@ if not hasattr(socket, 'SOL_PACKET'):
     socket.SOL_PACKET = 263
 
 # Configuration
-INTERFACE = "enp0s1"
+INTERFACE = "enp3s0"
 CLUSTER_ID = 99
 FLOW_TIMEOUT = 30  # seconds
 IDLE_THRESHOLD = 1.0  # seconds to consider idle
