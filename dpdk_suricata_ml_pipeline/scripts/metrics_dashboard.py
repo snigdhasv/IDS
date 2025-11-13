@@ -1,293 +1,276 @@
 #!/usr/bin/env python3
 """
-Real-time Metrics Dashboard
+Web Metrics Dashboard (no external dependencies)
 
-Monitors and displays real-time metrics from the IDS pipeline.
-Refreshes every 5 seconds to show current performance.
+Serves a lightweight web UI on http://localhost:5000 to visualize real-time
+IDS pipeline metrics from existing logs and metrics files.
 
-Usage:
-    ./metrics_dashboard.py [--metrics-dir DIR] [--refresh-interval SECONDS]
+Endpoints:
+  - /            : Single-page dashboard (HTML + JS)
+  - /api/summary : Aggregated metrics JSON (updated on each request)
+
+Reads from:
+  - logs/ml_consumer.log (ensemble or single ML consumer)
+  - logs/suricata_ml_consumer.log (alerts ML consumer, optional)
+  - logs/feature_engine.log (feature engine)
+  - logs/metrics/metrics_YYYYMMDD.jsonl (structured metrics if present)
+  - /var/log/suricata/suricata.log (Suricata)
 """
 
-import time
 import json
-import os
-import sys
-import argparse
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from datetime import datetime
-from collections import defaultdict
 
-def clear_screen():
-    """Clear terminal screen."""
-    os.system('clear' if os.name != 'nt' else 'cls')
+ROOT_DIR = Path(__file__).resolve().parents[2]
+LOGS_DIR = ROOT_DIR / 'logs'
+METRICS_DIR = LOGS_DIR / 'metrics'
+ML_LOG = LOGS_DIR / 'ml_consumer.log'
+SURICATA_ML_LOG = LOGS_DIR / 'suricata_ml_consumer.log'
+FEATURE_LOG = LOGS_DIR / 'feature_engine.log'
+SURICATA_LOG = Path('/var/log/suricata/suricata.log')
 
-def load_latest_metrics(metrics_dir):
-    """Load latest metrics from JSON file."""
-    metrics_dir = Path(metrics_dir)
-    today = datetime.now().strftime('%Y%m%d')
-    json_file = metrics_dir / f'metrics_{today}.jsonl'
-    
-    if not json_file.exists():
-        return None
-    
-    # Read last 1000 lines
-    metrics = {
-        'latency': [],
-        'throughput': [],
-        'ml': [],
-        'errors': [],
-        'system': []
-    }
-    
+def _tail_lines(path: Path, max_lines: int = 500):
     try:
-        with open(json_file, 'r') as f:
-            # Read last N lines efficiently
-            lines = f.readlines()[-1000:]
-            for line in lines:
-                try:
-                    record = json.loads(line)
-                    metric_type = record.get('type')
-                    if metric_type in metrics:
-                        metrics[metric_type].append(record)
-                except json.JSONDecodeError:
-                    continue
-    except Exception as e:
-        print(f"Error loading metrics: {e}")
-        return None
-    
-    return metrics
+        with open(path, 'r') as f:
+            return f.readlines()[-max_lines:]
+    except Exception:
+        return []
 
-def calculate_stats(metrics):
-    """Calculate statistics from metrics."""
-    stats = {}
-    
-    # Latency stats by component
-    latencies_by_comp = defaultdict(list)
-    for m in metrics['latency']:
-        key = f"{m['component']}.{m['operation']}"
-        latencies_by_comp[key].append(m['latency_ms'])
-    
-    stats['latency'] = {}
-    for key, values in latencies_by_comp.items():
-        if values:
-            sorted_values = sorted(values)
-            n = len(sorted_values)
-            stats['latency'][key] = {
+def _parse_ml_log(lines):
+    total = 0
+    benign = 0
+    attack = 0
+    confidences = []
+    recent = []
+    pat = re.compile(r"\]\s*(BENIGN|Attack|ATTACK).*conf:\s*([0-9.]+)")
+    for line in lines[-200:]:
+        m = pat.search(line)
+        if m:
+            label = m.group(1).upper()
+            conf = float(m.group(2)) if m.group(2) else 0.0
+            total += 1
+            if label.startswith('BENIGN'):
+                benign += 1
+            else:
+                attack += 1
+            confidences.append(conf)
+            recent.append({'ts': line.split(' - ')[0], 'label': label, 'confidence': conf})
+    avg_conf = sum(confidences)/len(confidences) if confidences else 0.0
+    return {'total': total, 'benign': benign, 'attack': attack, 'avg_confidence': avg_conf, 'recent': recent[-20:]}
+
+def _parse_suricata_log(lines):
+    alerts = 0
+    recent = []
+    for line in lines[-500:]:
+        if 'Alert' in line or 'ALERT' in line:
+            alerts += 1
+            recent.append(line.strip()[:180])
+    return {'alerts': alerts, 'recent': recent[-20:]}
+
+def _parse_metrics_jsonl():
+    try:
+        today = datetime.now().strftime('%Y%m%d')
+        jf = METRICS_DIR / f'metrics_{today}.jsonl'
+        if not jf.exists():
+            return {}
+        latencies = []
+        ml_preds = {}
+        throughput = {}
+        system = {}
+        with open(jf, 'r') as f:
+            for line in f.readlines()[-1000:]:
+                rec = json.loads(line)
+                t = rec.get('type')
+                if t == 'latency':
+                    latencies.append(rec.get('latency_ms', 0))
+                elif t == 'ml':
+                    p = rec.get('prediction', 'UNKNOWN')
+                    ml_preds[p] = ml_preds.get(p, 0) + 1
+                elif t == 'throughput':
+                    c = rec.get('component', 'pipeline')
+                    throughput[c] = throughput.get(c, 0) + rec.get('events_count', 0)
+                elif t == 'system':
+                    system = {
+                        'cpu_percent': rec.get('cpu_percent', 0),
+                        'memory_percent': rec.get('memory_percent', 0),
+                        'memory_mb': rec.get('memory_mb', 0),
+                    }
+        lat_stats = {}
+        if latencies:
+            s = sorted(latencies)
+            n = len(s)
+            lat_stats = {
                 'count': n,
-                'mean': sum(values) / n,
-                'min': min(values),
-                'max': max(values),
-                'p50': sorted_values[int(n * 0.5)],
-                'p95': sorted_values[int(n * 0.95)],
-                'p99': sorted_values[int(n * 0.99)],
+                'mean_ms': sum(s)/n,
+                'p50_ms': s[int(n*0.5)],
+                'p95_ms': s[int(n*0.95)],
+                'p99_ms': s[int(n*0.99)] if n > 0 else 0,
             }
-    
-    # Throughput stats
-    throughput_by_comp = defaultdict(int)
-    for m in metrics['throughput']:
-        throughput_by_comp[m['component']] += m['events_count']
-    stats['throughput'] = dict(throughput_by_comp)
-    
-    # ML prediction counts
-    ml_predictions = defaultdict(int)
-    ml_inference_times = []
-    for m in metrics['ml']:
-        ml_predictions[m['prediction']] += 1
-        ml_inference_times.append(m['inference_time_ms'])
-    
-    stats['ml_predictions'] = dict(ml_predictions)
-    stats['ml_inference_mean'] = sum(ml_inference_times) / len(ml_inference_times) if ml_inference_times else 0
-    
-    # Error counts
-    error_by_comp = defaultdict(int)
-    error_by_severity = defaultdict(int)
-    for m in metrics['errors']:
-        error_by_comp[m['component']] += 1
-        error_by_severity[m.get('severity', 'unknown')] += 1
-    stats['error_counts'] = dict(error_by_comp)
-    stats['error_by_severity'] = dict(error_by_severity)
-    
-    # System metrics (latest)
-    if metrics['system']:
-        latest_system = metrics['system'][-1]
-        stats['system'] = {
-            'cpu_percent': latest_system.get('cpu_percent', 0),
-            'memory_percent': latest_system.get('memory_percent', 0),
-            'memory_mb': latest_system.get('memory_mb', 0),
-        }
-    else:
-        stats['system'] = {}
-    
-    return stats
+        return {'latency': lat_stats, 'ml_preds': ml_preds, 'throughput': throughput, 'system': system}
+    except Exception:
+        return {}
 
-def display_dashboard(stats):
-    """Display metrics dashboard."""
-    clear_screen()
-    
-    print("╔══════════════════════════════════════════════════════════════════════════╗")
-    print("║                  IDS PIPELINE METRICS DASHBOARD                         ║")
-    print("╚══════════════════════════════════════════════════════════════════════════╝")
-    print(f"⏰ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # System resources (if available)
-    if stats.get('system'):
-        sys_stats = stats['system']
-        print(f"💻 System: CPU {sys_stats['cpu_percent']:.1f}% | "
-              f"Memory {sys_stats['memory_percent']:.1f}% ({sys_stats['memory_mb']:.0f} MB)")
-    
-    print()
-    
-    # Latency Section
-    print("┌─ LATENCY (milliseconds) ───────────────────────────────────────────────┐")
-    if stats.get('latency'):
-        # Show top components by p95 latency
-        sorted_components = sorted(
-            stats['latency'].items(),
-            key=lambda x: x[1]['p95'],
-            reverse=True
-        )[:5]  # Show top 5
-        
-        print("│ Component.Operation                      Mean    P50    P95    P99    │")
-        print("├─────────────────────────────────────────────────────────────────────────┤")
-        for component, values in sorted_components:
-            comp_short = component[:35] + '...' if len(component) > 35 else component
-            print(f"│ {comp_short:<35} {values['mean']:6.2f} {values['p50']:6.2f} "
-                  f"{values['p95']:6.2f} {values['p99']:6.2f} │")
-    else:
-        print("│ No data available                                                       │")
-    print("└─────────────────────────────────────────────────────────────────────────┘")
-    print()
-    
-    # Throughput Section
-    print("┌─ THROUGHPUT (total events processed) ───────────────────────────────────┐")
-    if stats.get('throughput'):
-        print("│ Component                            Events                             │")
-        print("├─────────────────────────────────────────────────────────────────────────┤")
-        for component, count in sorted(stats['throughput'].items(), key=lambda x: x[1], reverse=True):
-            comp_short = component[:30] + '...' if len(component) > 30 else component
-            print(f"│ {comp_short:<30} {count:>15,}                          │")
-    else:
-        print("│ No data available                                                       │")
-    print("└─────────────────────────────────────────────────────────────────────────┘")
-    print()
-    
-    # ML Predictions Section
-    print("┌─ ML PREDICTIONS ─────────────────────────────────────────────────────────┐")
-    if stats.get('ml_predictions'):
-        total = sum(stats['ml_predictions'].values())
-        print(f"│ Total Predictions: {total:,}")
-        if stats.get('ml_inference_mean'):
-            print(f"│ Avg Inference Time: {stats['ml_inference_mean']:.2f} ms")
-        print("│                                                                         │")
-        print("│ Prediction Class                     Count          Percentage         │")
-        print("├─────────────────────────────────────────────────────────────────────────┤")
-        for prediction, count in sorted(stats['ml_predictions'].items(), key=lambda x: x[1], reverse=True):
-            pct = (count / total * 100) if total > 0 else 0
-            pred_short = prediction[:30] + '...' if len(prediction) > 30 else prediction
-            bar_length = int(pct / 2)  # Max 50 chars
-            bar = '█' * bar_length
-            print(f"│ {pred_short:<30} {count:>8,}   {pct:>5.1f}% {bar:<15}│")
-    else:
-        print("│ No data available                                                       │")
-    print("└─────────────────────────────────────────────────────────────────────────┘")
-    print()
-    
-    # Errors Section
-    print("┌─ ERRORS ─────────────────────────────────────────────────────────────────┐")
-    if stats.get('error_counts'):
-        total_errors = sum(stats['error_counts'].values())
-        print(f"│ Total Errors: {total_errors}")
-        print("│                                                                         │")
-        print("│ Component                            Errors                             │")
-        print("├─────────────────────────────────────────────────────────────────────────┤")
-        for component, count in sorted(stats['error_counts'].items(), key=lambda x: x[1], reverse=True):
-            comp_short = component[:30] + '...' if len(component) > 30 else component
-            print(f"│ {comp_short:<30} {count:>8}                               │")
-        
-        if stats.get('error_by_severity'):
-            print("│                                                                         │")
-            print("│ By Severity:                                                            │")
-            for severity, count in sorted(stats['error_by_severity'].items()):
-                print(f"│   {severity}: {count}                                                │")
-    else:
-        print("│ No errors 🎉                                                            │")
-    print("└─────────────────────────────────────────────────────────────────────────┘")
-    print()
-    
-    print("Press Ctrl+C to exit | Dashboard refreshes automatically")
+def build_summary():
+    ml_summary = _parse_ml_log(_tail_lines(ML_LOG, 2000)) if ML_LOG.exists() else {}
+    suri_summary = _parse_suricata_log(_tail_lines(SURICATA_LOG, 2000)) if SURICATA_LOG.exists() else {}
+    suri_ml_summary = _parse_ml_log(_tail_lines(SURICATA_ML_LOG, 2000)) if SURICATA_ML_LOG.exists() else {}
+    metrics_structured = _parse_metrics_jsonl()
+    feature_lines = _tail_lines(FEATURE_LOG, 500)
+    features_processed = len(feature_lines)
+    return {
+        'timestamp': datetime.now().isoformat(),
+        'ml': ml_summary,
+        'suricata_alerts': suri_summary,
+        'suricata_ml': suri_ml_summary,
+        'metrics': metrics_structured,
+        'feature_engine': {'recent_lines': feature_lines[-10:], 'approx_events': features_processed}
+    }
+
+INDEX_HTML = """
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>IDS Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/modern-css-reset/dist/reset.min.css" />
+    <style>
+      body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 20px; }
+      h1 { margin-bottom: 10px; }
+      .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+      .card { border: 1px solid #ddd; border-radius: 8px; padding: 14px; }
+      .muted { color: #666; font-size: 12px; }
+      pre { background: #f7f7f7; padding: 8px; border-radius: 6px; overflow: auto; }
+      @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <h1>IDS Real‑Time Dashboard</h1>
+    <div class="muted">Live metrics from ML predictions, Suricata alerts, and feature engine</div>
+    <div id="updated" class="muted" style="margin-top:8px;"></div>
+    <div class="grid" style="margin-top:16px;">
+      <div class="card">
+        <h3>ML Predictions</h3>
+        <canvas id="mlChart" height="120"></canvas>
+        <div id="mlStats" class="muted"></div>
+      </div>
+      <div class="card">
+        <h3>Suricata Alerts</h3>
+        <div id="suriCount" style="font-size:24px; font-weight:600;">—</div>
+        <div class="muted">Recent Alerts</div>
+        <pre id="suriRecent"></pre>
+      </div>
+      <div class="card">
+        <h3>System</h3>
+        <div id="sysStats" class="muted"></div>
+        <div class="muted">Latency (p95)</div>
+        <div id="latencyP95" style="font-size:20px; font-weight:600;">— ms</div>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:16px;">
+      <div class="card">
+        <h3>Feature Engine</h3>
+        <div id="featCount" style="font-size:24px; font-weight:600;">—</div>
+        <div class="muted">Recent Lines</div>
+        <pre id="featRecent"></pre>
+      </div>
+      <div class="card">
+        <h3>Suricata ML Consumer</h3>
+        <div id="suriMlStats" class="muted"></div>
+      </div>
+      <div class="card">
+        <h3>Kafka Throughput</h3>
+        <pre id="throughput"></pre>
+      </div>
+    </div>
+
+    <script>
+      let mlChart;
+      async function refresh() {
+        const res = await fetch('/api/summary');
+        const data = await res.json();
+        document.getElementById('updated').textContent = 'Updated: ' + new Date(data.timestamp).toLocaleString();
+        // ML stats
+        const ml = data.ml || {};
+        const total = ml.total || 0;
+        const benign = ml.benign || 0;
+        const attack = ml.attack || 0;
+        const avgConf = (ml.avg_confidence || 0).toFixed(3);
+        document.getElementById('mlStats').textContent = `Total: ${total} | Benign: ${benign} | Attack: ${attack} | Avg conf: ${avgConf}`;
+        const ctx = document.getElementById('mlChart');
+        const chartData = {labels: ['BENIGN', 'ATTACK'], datasets: [{label: 'Predictions', data: [benign, attack], backgroundColor: ['#2a9d8f', '#e76f51']}]};
+        if (!mlChart) { mlChart = new Chart(ctx, { type: 'bar', data: chartData, options: { responsive: true, plugins: { legend: { display: false }}}}); } else { mlChart.data = chartData; mlChart.update(); }
+        // Suricata
+        const suri = data.suricata_alerts || {};
+        document.getElementById('suriCount').textContent = suri.alerts || 0;
+        document.getElementById('suriRecent').textContent = (suri.recent || []).join('\n');
+        // System + latency
+        const sys = (data.metrics && data.metrics.system) || {};
+        document.getElementById('sysStats').textContent = `CPU: ${(sys.cpu_percent||0).toFixed(1)}% | Mem: ${(sys.memory_percent||0).toFixed(1)}% (${(sys.memory_mb||0).toFixed(0)} MB)`;
+        const lat = (data.metrics && data.metrics.latency) || {};
+        document.getElementById('latencyP95').textContent = ((lat.p95_ms||0).toFixed(2)) + ' ms';
+        // Feature engine
+        const feat = data.feature_engine || {};
+        document.getElementById('featCount').textContent = feat.approx_events || 0;
+        document.getElementById('featRecent').textContent = (feat.recent_lines || []).join('');
+        // Suricata ML
+        const sml = data.suricata_ml || {};
+        document.getElementById('suriMlStats').textContent = `Total: ${sml.total||0} | Attack: ${sml.attack||0} | Benign: ${sml.benign||0}`;
+        // Kafka throughput
+        const tp = (data.metrics && data.metrics.throughput) || {};
+        document.getElementById('throughput').textContent = JSON.stringify(tp, null, 2);
+      }
+      refresh();
+      setInterval(refresh, 2000);
+    </script>
+  </body>
+</html>
+"""
+
+class DashboardHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            path = self.path.split('?', 1)[0]
+            if path == '/' or path.startswith('/index.html'):
+                body = INDEX_HTML.encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path.startswith('/api/summary'):
+                summary = build_summary()
+                body = json.dumps(summary).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(404)
+            self.end_headers()
+        except Exception:
+            self.send_response(500)
+            self.end_headers()
+
+def run_server(host='0.0.0.0', port=5000):
+    for p in [port] + list(range(5001, 5011)):
+        try:
+            httpd = HTTPServer((host, p), DashboardHandler)
+            httpd.serve_forever()
+            break
+        except OSError:
+            continue
 
 def main():
-    """Main dashboard loop."""
-    parser = argparse.ArgumentParser(description='IDS Pipeline Metrics Dashboard')
-    parser.add_argument('--metrics-dir', 
-                       default=None,
-                       help='Path to metrics directory')
-    parser.add_argument('--refresh-interval', 
-                       type=int,
-                       default=5,
-                       help='Dashboard refresh interval in seconds (default: 5)')
-    
-    args = parser.parse_args()
-    
-    # Determine metrics directory
-    if args.metrics_dir:
-        metrics_dir = Path(args.metrics_dir)
-    else:
-        # Try to find metrics directory relative to script location
-        script_dir = Path(__file__).parent
-        metrics_dir = script_dir.parent / 'logs' / 'metrics'
-    
-    if not metrics_dir.exists():
-        print(f"❌ Metrics directory not found: {metrics_dir}")
-        print(f"\nPlease specify correct path with --metrics-dir option")
-        sys.exit(1)
-    
-    print(f"🚀 Starting IDS Metrics Dashboard...")
-    print(f"📊 Monitoring: {metrics_dir}")
-    print(f"🔄 Refresh interval: {args.refresh_interval}s")
-    print(f"⌨️  Press Ctrl+C to exit\n")
-    
-    time.sleep(2)
-    
-    try:
-        first_run = True
-        while True:
-            metrics = load_latest_metrics(metrics_dir)
-            
-            if metrics and any(len(v) > 0 for v in metrics.values()):
-                stats = calculate_stats(metrics)
-                display_dashboard(stats)
-            else:
-                if first_run:
-                    clear_screen()
-                    print("╔══════════════════════════════════════════════════════════════════════════╗")
-                    print("║                  IDS PIPELINE METRICS DASHBOARD                         ║")
-                    print("╚══════════════════════════════════════════════════════════════════════════╝")
-                    print()
-                    print("⏳ Waiting for metrics data...")
-                    print()
-                    print(f"📂 Monitoring directory: {metrics_dir}")
-                    print(f"📅 Looking for file: metrics_{datetime.now().strftime('%Y%m%d')}.jsonl")
-                    print()
-                    print("💡 Make sure the IDS pipeline is running and generating metrics.")
-                    print("   The dashboard will automatically update when data becomes available.")
-                    print()
-                    print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                    print()
-                    print("Press Ctrl+C to exit")
-                    first_run = False
-            
-            time.sleep(args.refresh_interval)
-            
-    except KeyboardInterrupt:
-        print("\n\n👋 Dashboard stopped. Goodbye!")
-        sys.exit(0)
-    except Exception as e:
-        print(f"\n\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    run_server()
 
 if __name__ == '__main__':
     main()
