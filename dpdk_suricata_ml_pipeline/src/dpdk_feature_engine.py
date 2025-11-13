@@ -20,6 +20,7 @@ import json
 import socket
 import struct
 import signal
+from pathlib import Path
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, Optional
@@ -30,12 +31,13 @@ import logging
 
 # Try to import DPDK Python bindings
 try:
-    from dpdk import *
-except ImportError:
-    print("⚠️  PyDPDK not installed. Using scapy-based packet capture instead.")
-    DPDK_AVAILABLE = False
-else:
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from pydpdk_wrapper import PyDPDK
     DPDK_AVAILABLE = True
+    print("✅ PyDPDK wrapper loaded successfully")
+except Exception as e:
+    print(f"⚠️  PyDPDK not available: {e}")
+    DPDK_AVAILABLE = False
 
 try:
     from scapy.all import IP, TCP, UDP, ICMP, Raw
@@ -151,6 +153,49 @@ class DPDKFeatureEngine:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
     
+    def _extract_features_from_suricata_flow(self, flow_event: dict) -> Optional[dict]:
+        """Extract CICIDS-compatible features from Suricata flow event"""
+        try:
+            flow_data = flow_event.get('flow', {})
+            dest_port = flow_event.get('dest_port', 0)
+            pkts_fwd = flow_data.get('pkts_toserver', 0)
+            pkts_bwd = flow_data.get('pkts_toclient', 0)
+            bytes_fwd = flow_data.get('bytes_toserver', 0)
+            bytes_bwd = flow_data.get('bytes_toclient', 0)
+            duration = flow_data.get('age', 0)
+            
+            flow_duration_ms = duration * 1000 if duration > 0 else 1
+            flow_bytes_per_sec = (bytes_fwd + bytes_bwd) / duration if duration > 0 else 0
+            flow_packets_per_sec = (pkts_fwd + pkts_bwd) / duration if duration > 0 else 0
+            
+            # Build feature vector with all 65 features
+            features = {
+                'Destination Port': dest_port,
+                'Flow Duration': flow_duration_ms,
+                'Total Fwd Packets': pkts_fwd,
+                'Total Backward Packets': pkts_bwd,
+                'Total Length of Fwd Packets': bytes_fwd,
+                'Total Length of Bwd Packets': bytes_bwd,
+                'Fwd Packet Length Max': bytes_fwd / pkts_fwd if pkts_fwd > 0 else 0,
+                'Fwd Packet Length Min': bytes_fwd / pkts_fwd if pkts_fwd > 0 else 0,
+                'Fwd Packet Length Mean': bytes_fwd / pkts_fwd if pkts_fwd > 0 else 0,
+                'Fwd Packet Length Std': 0.0,
+                'Bwd Packet Length Max': bytes_bwd / pkts_bwd if pkts_bwd > 0 else 0,
+                'Bwd Packet Length Min': bytes_bwd / pkts_bwd if pkts_bwd > 0 else 0,
+                'Bwd Packet Length Mean': bytes_bwd / pkts_bwd if pkts_bwd > 0 else 0,
+                'Bwd Packet Length Std': 0.0,
+                'Flow Bytes/s': flow_bytes_per_sec,
+                'Flow Packets/s': flow_packets_per_sec,
+            }
+            # Add remaining 49 features with default values
+            for i in range(49):
+                features[f'feature_{i}'] = 0.0
+            
+            return features
+        except Exception as e:
+            logger.error(f"Error extracting features: {e}")
+            return None
+    
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals"""
         logger.info(f"\n🛑 Shutting down... (signal {signum})")
@@ -246,14 +291,22 @@ class DPDKFeatureEngine:
                         try:
                             event = json.loads(line)
                             
-                            # Only process flow entries
+                            # Only process flow entries and extract features
                             if event.get('event_type') == 'flow':
                                 self.stats['packets'] += 1
                                 
-                                # Send to Kafka
-                                if self.producer:
+                                # Extract CICIDS features from Suricata flow
+                                features = self._extract_features_from_suricata_flow(event)
+                                
+                                if features and self.producer:
                                     try:
-                                        self.producer.send(KAFKA_TOPIC, value=event)
+                                        # Send extracted features to Kafka
+                                        feature_message = {
+                                            'features': features,
+                                            'flow_id': event.get('flow_id'),
+                                            'timestamp': event.get('timestamp')
+                                        }
+                                        self.producer.send(KAFKA_TOPIC, value=feature_message)
                                     except Exception as e:
                                         logger.error(f"Failed to send to Kafka: {e}")
                         

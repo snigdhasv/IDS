@@ -16,7 +16,7 @@ from two_model_ensemble import TwoModelEnsemble
 logger = logging.getLogger(__name__)
 
 # Default model directory
-DEFAULT_MODEL_DIR = "/home/sujay/Programming/IDS/ML Models"
+DEFAULT_MODEL_DIR = "/home/ifscr/SE_02_2025/IDS/ML Models"
 
 
 def list_available_models(model_dir: str = DEFAULT_MODEL_DIR) -> List[str]:

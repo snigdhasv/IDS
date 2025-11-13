@@ -255,7 +255,7 @@ class TwoModelKafkaConsumer:
         try:
             # Extract features
             with LatencyTimer(self.metrics, 'ensemble_consumer', 'feature_extraction'):
-                features = self.feature_extractor.extract_features(flow_event)
+                features = self.feature_extractor.extract_from_flow(flow_event)
                 if features is None:
                     return None
                 
