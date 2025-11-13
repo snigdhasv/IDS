@@ -26,7 +26,7 @@ KAFKA_BOOTSTRAP = "localhost:9092"
 KAFKA_TOPIC = "ml-features"
 KAFKA_GROUP = "ml-inference-realtime"
 # Use the well-trained 34-feature PCA model
-MODEL_PATH = "/home/s-ujay/Programming/IDS/ML Models/random_forest_model_2017.joblib"
+MODEL_PATH = "/home/ifscr/SE_02_2025/IDS/ML Models/random_forest_model_2017.joblib"
 
 # Logging
 logging.basicConfig(

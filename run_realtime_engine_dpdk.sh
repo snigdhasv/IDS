@@ -341,6 +341,69 @@ start_ml_consumer() {
     fi
 }
 
+start_suricata_ml_consumer() {
+    echo -e "${BLUE}[4b/5]${NC} Starting Suricata ML Consumer (alerts → predictions)..."
+
+    mkdir -p "$SCRIPT_DIR/logs"
+
+    if pgrep -f "ml_kafka_consumer.py" > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  Suricata ML Consumer already running${NC}"
+        SML_PID=$(pgrep -f "ml_kafka_consumer.py" | head -n1)
+        echo "  PID: $SML_PID"
+        echo "  Log: logs/suricata_ml_consumer.log"
+        return 0
+    fi
+
+    if [ ! -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/ml_kafka_consumer.py" ]; then
+        echo -e "${YELLOW}⚠️  ml_kafka_consumer.py not found${NC}"
+        return 0
+    fi
+
+    cd "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src"
+    source "${VENV_PATH}/bin/activate"
+
+    > "$SCRIPT_DIR/logs/suricata_ml_consumer.log"
+
+    echo "  Starting: python3 ml_kafka_consumer.py"
+    echo "  Log: logs/suricata_ml_consumer.log"
+
+    PYTHONWARNINGS="ignore::UserWarning" python3 -u ml_kafka_consumer.py \
+        > "$SCRIPT_DIR/logs/suricata_ml_consumer.log" 2>&1 &
+    SML_PID=$!
+
+    sleep 2
+    if kill -0 $SML_PID 2>/dev/null; then
+        echo -e "${GREEN}✓ Suricata ML Consumer started (PID: $SML_PID)${NC}"
+    else
+        echo -e "${RED}❌ Suricata ML Consumer died immediately${NC}"
+        tail -20 "$SCRIPT_DIR/logs/suricata_ml_consumer.log" | sed 's/^/    /'
+        deactivate
+        cd "$SCRIPT_DIR"
+        return 1
+    fi
+
+    sleep 3
+    if kill -0 $SML_PID 2>/dev/null; then
+        echo -e "${GREEN}✓ Suricata ML Consumer running stable (PID: $SML_PID)${NC}"
+        echo "  Input: Kafka topic 'suricata-alerts'"
+        echo "  Output: Kafka topic 'ml-predictions'"
+        echo ""
+        echo "  Initial log output:"
+        head -10 "$SCRIPT_DIR/logs/suricata_ml_consumer.log" 2>/dev/null | sed 's/^/    /' || true
+        echo ""
+        deactivate
+        cd "$SCRIPT_DIR"
+        ((STARTED_SERVICES++))
+        return 0
+    else
+        echo -e "${RED}❌ Suricata ML Consumer crashed after startup${NC}"
+        cat "$SCRIPT_DIR/logs/suricata_ml_consumer.log" | sed 's/^/    /'
+        deactivate
+        cd "$SCRIPT_DIR"
+        return 1
+    fi
+}
+
 start_metrics_dashboard() {
     echo -e "${BLUE}[5/5]${NC} Starting Metrics Dashboard (optional)..."
     
@@ -446,11 +509,11 @@ stop_all() {
     # Stop in reverse order (ML Consumer → Feature Engine → Suricata → Kafka)
     
     # ML Consumers (both single and ensemble)
-    pkill -9 -f "realtime_ensemble_consumer.py\|realtime_ml_consumer.py" 2>/dev/null && \
+    pkill -9 -f "realtime_ensemble_consumer.py\|realtime_ml_consumer.py\|ml_kafka_consumer.py" 2>/dev/null && \
         echo -e "${GREEN}✓ ML Consumer stopped${NC}" || true
     
     # Feature Engine (DPDK)
-    pkill -9 -f "realtime_feature_engine.py" 2>/dev/null && \
+    pkill -9 -f "dpdk_feature_engine.py" 2>/dev/null && \
         echo -e "${GREEN}✓ Feature Engine stopped${NC}" || true
     
     # Suricata DPDK
@@ -510,8 +573,8 @@ show_status() {
     fi
     
     # Feature Engine
-    if pgrep -f "realtime_feature_engine" > /dev/null 2>&1; then
-        FEATURE_PID=$(pgrep -f "realtime_feature_engine" | head -n1)
+    if pgrep -f "dpdk_feature_engine" > /dev/null 2>&1; then
+        FEATURE_PID=$(pgrep -f "dpdk_feature_engine" | head -n1)
         echo -e "  ${GREEN}✓${NC} Feature Engine: Running (PID $FEATURE_PID)"
     else
         echo -e "  ${RED}✗${NC} Feature Engine: Stopped"
@@ -523,6 +586,14 @@ show_status() {
         echo -e "  ${GREEN}✓${NC} ML Consumer: Running (PID $ML_PID)"
     else
         echo -e "  ${RED}✗${NC} ML Consumer: Stopped"
+    fi
+
+    # Suricata ML Consumer
+    if pgrep -f "ml_kafka_consumer.py" > /dev/null 2>&1; then
+        SML_PID=$(pgrep -f "ml_kafka_consumer.py" | head -n1)
+        echo -e "  ${GREEN}✓${NC} Suricata ML Consumer: Running (PID $SML_PID)"
+    else
+        echo -e "  ${YELLOW}○${NC} Suricata ML Consumer: Stopped (optional)"
     fi
     
     # Metrics Dashboard
@@ -561,6 +632,7 @@ main() {
             start_suricata_dpdk
             start_feature_engine_dpdk
             start_ml_consumer
+            start_suricata_ml_consumer
             start_metrics_dashboard
             
             show_summary
