@@ -859,6 +859,47 @@ terminal2$ ./monitor_traffic.sh  # Select option 3
 tail -f /var/log/suricata/eve.json | grep "SQL Injection" | jq .
 ```
 
+## metrics_dashboard3.py
+
+**Purpose**: Serve a zero-dependency, real-time dashboard that visualizes the full IDS data plane (Suricata alerts, feature engine stats, Kafka throughput, ML predictions, and system health) straight from the existing log files.
+
+**Why a third version?**
+- Previous dashboards (`metrics_dashboard.py` and `metrics_dashboard2.py`) were simple request-per-read scripts. They struggled when logs were large or missing, and they didn’t surface structured metrics like latency quantiles.
+- `metrics_dashboard3.py` adds a thread-safe collector that continuously summarizes the logs, exposes a richer JSON API, and ships a modern responsive UI that works on laptops, tablets, or phones.
+- Includes a `--dump` mode so CI/tests can validate log parsing quickly without binding to a TCP port.
+
+**What it reads**:
+- `logs/ml_consumer.log` and `logs/suricata_ml_consumer.log` for predictions and confidence trends
+- `logs/feature_engine.log` for packet/flow counts and recent activity
+- `logs/suricata.log` (or `/var/log/suricata/suricata.log`) for signature alerts
+- `logs/metrics/metrics_YYYYMMDD.jsonl` for structured latency/throughput/system stats
+
+**Endpoints**:
+- `/` – single-page dashboard with cards for ML, Suricata, feature engine, throughput, latency, and source health
+- `/api/summary` – JSON payload consumed by the UI (can also be reused by scripts or Grafana)
+
+**Running it**:
+```bash
+cd dpdk_suricata_ml_pipeline/scripts
+python3 metrics_dashboard3.py                 # serve UI on the first free port in 5510-5520
+python3 metrics_dashboard3.py --dump          # print one JSON snapshot and exit
+python3 metrics_dashboard3.py --port 6000     # bind to a specific port
+```
+
+The orchestration script `run_realtime_engine_dpdk.sh` now prefers this file automatically, writes the bound URL to `logs/metrics_dashboard.port`, and tails output to `logs/metrics_dashboard.log` for troubleshooting.
+
+**Key improvements**:
+- Background collector thread (2s cadence) so HTTP responses are instant and consistent
+- Robust parsing with graceful handling when a log is missing or stale (health indicators turn red)
+- Latency/inference summaries with p50/p95/p99 as well as throughput breakdown per component
+- Mobile-friendly UI with responsive cards, attack breakdown list, and recent prediction tables
+- Sanitized data (textContent instead of innerHTML) to avoid rendering glitches from log artifacts
+
+**Troubleshooting tips**:
+- If the page loads but never updates, check `logs/metrics_dashboard.log` for stack traces
+- Run `python3 metrics_dashboard3.py --dump` to see raw JSON and confirm the collector can read your logs
+- Ensure `logs/metrics/metrics_*.jsonl` exists; otherwise latency/system tiles will stay blank
+
 **Note**: This is a **read-only monitoring tool** - it doesn't modify logs, stop processes, or change configuration. Safe to run anytime for visibility into IDS operations.
 
 ----

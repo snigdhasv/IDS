@@ -31,6 +31,7 @@ ML_LOG = LOGS_DIR / 'ml_consumer.log'
 SURICATA_ML_LOG = LOGS_DIR / 'suricata_ml_consumer.log'
 FEATURE_LOG = LOGS_DIR / 'feature_engine.log'
 SURICATA_LOG = Path('/var/log/suricata/suricata.log')
+ALT_SURICATA_LOG = LOGS_DIR / 'suricata.log'
 
 def _tail_lines(path: Path, max_lines: int = 500):
     try:
@@ -45,19 +46,36 @@ def _parse_ml_log(lines):
     attack = 0
     confidences = []
     recent = []
-    pat = re.compile(r"\]\s*(BENIGN|Attack|ATTACK).*conf:\s*([0-9.]+)")
-    for line in lines[-200:]:
-        m = pat.search(line)
+    # Support both "conf: 0.987" and "confidence: 98.7%" formats
+    pat_decimal = re.compile(r"(BENIGN|Attack|ATTACK).*conf:\s*([0-9.]+)", re.IGNORECASE)
+    pat_percent = re.compile(r"(BENIGN|Attack|ATTACK).*confidence:\s*([0-9.]+)%", re.IGNORECASE)
+    for line in lines[-400:]:
+        line_u = line.strip()
+        m = pat_percent.search(line_u)
         if m:
             label = m.group(1).upper()
-            conf = float(m.group(2)) if m.group(2) else 0.0
-            total += 1
-            if label.startswith('BENIGN'):
-                benign += 1
+            conf = float(m.group(2)) / 100.0
+        else:
+            m = pat_decimal.search(line_u)
+            if not m:
+                # Try to infer label without patterns
+                if 'BENIGN' in line_u.upper():
+                    label = 'BENIGN'
+                elif 'ATTACK' in line_u.upper():
+                    label = 'ATTACK'
+                else:
+                    continue
+                conf = 0.0
             else:
-                attack += 1
-            confidences.append(conf)
-            recent.append({'ts': line.split(' - ')[0], 'label': label, 'confidence': conf})
+                label = m.group(1).upper()
+                conf = float(m.group(2)) if m.group(2) else 0.0
+        total += 1
+        if label.startswith('BENIGN'):
+            benign += 1
+        else:
+            attack += 1
+        confidences.append(conf)
+        recent.append({'ts': line_u.split(' - ')[0], 'label': label, 'confidence': conf})
     avg_conf = sum(confidences)/len(confidences) if confidences else 0.0
     return {'total': total, 'benign': benign, 'attack': attack, 'avg_confidence': avg_conf, 'recent': recent[-20:]}
 
@@ -115,7 +133,12 @@ def _parse_metrics_jsonl():
 
 def build_summary():
     ml_summary = _parse_ml_log(_tail_lines(ML_LOG, 2000)) if ML_LOG.exists() else {}
-    suri_summary = _parse_suricata_log(_tail_lines(SURICATA_LOG, 2000)) if SURICATA_LOG.exists() else {}
+    if SURICATA_LOG.exists():
+        suri_summary = _parse_suricata_log(_tail_lines(SURICATA_LOG, 2000))
+    elif ALT_SURICATA_LOG.exists():
+        suri_summary = _parse_suricata_log(_tail_lines(ALT_SURICATA_LOG, 2000))
+    else:
+        suri_summary = {}
     suri_ml_summary = _parse_ml_log(_tail_lines(SURICATA_ML_LOG, 2000)) if SURICATA_ML_LOG.exists() else {}
     metrics_structured = _parse_metrics_jsonl()
     feature_lines = _tail_lines(FEATURE_LOG, 500)
@@ -146,6 +169,7 @@ INDEX_HTML = """
       pre { background: #f7f7f7; padding: 8px; border-radius: 6px; overflow: auto; }
       @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
     </style>
+    <!-- Chart.js optional; page works without it -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   </head>
   <body>
@@ -190,40 +214,65 @@ INDEX_HTML = """
     </div>
 
     <script>
-      let mlChart;
-      async function refresh() {
-        const res = await fetch('/api/summary');
-        const data = await res.json();
-        document.getElementById('updated').textContent = 'Updated: ' + new Date(data.timestamp).toLocaleString();
-        // ML stats
-        const ml = data.ml || {};
-        const total = ml.total || 0;
-        const benign = ml.benign || 0;
-        const attack = ml.attack || 0;
-        const avgConf = (ml.avg_confidence || 0).toFixed(3);
-        document.getElementById('mlStats').textContent = `Total: ${total} | Benign: ${benign} | Attack: ${attack} | Avg conf: ${avgConf}`;
-        const ctx = document.getElementById('mlChart');
-        const chartData = {labels: ['BENIGN', 'ATTACK'], datasets: [{label: 'Predictions', data: [benign, attack], backgroundColor: ['#2a9d8f', '#e76f51']}]};
-        if (!mlChart) { mlChart = new Chart(ctx, { type: 'bar', data: chartData, options: { responsive: true, plugins: { legend: { display: false }}}}); } else { mlChart.data = chartData; mlChart.update(); }
-        // Suricata
-        const suri = data.suricata_alerts || {};
-        document.getElementById('suriCount').textContent = suri.alerts || 0;
-        document.getElementById('suriRecent').textContent = (suri.recent || []).join('\n');
-        // System + latency
-        const sys = (data.metrics && data.metrics.system) || {};
-        document.getElementById('sysStats').textContent = `CPU: ${(sys.cpu_percent||0).toFixed(1)}% | Mem: ${(sys.memory_percent||0).toFixed(1)}% (${(sys.memory_mb||0).toFixed(0)} MB)`;
-        const lat = (data.metrics && data.metrics.latency) || {};
-        document.getElementById('latencyP95').textContent = ((lat.p95_ms||0).toFixed(2)) + ' ms';
-        // Feature engine
-        const feat = data.feature_engine || {};
-        document.getElementById('featCount').textContent = feat.approx_events || 0;
-        document.getElementById('featRecent').textContent = (feat.recent_lines || []).join('');
-        // Suricata ML
-        const sml = data.suricata_ml || {};
-        document.getElementById('suriMlStats').textContent = `Total: ${sml.total||0} | Attack: ${sml.attack||0} | Benign: ${sml.benign||0}`;
-        // Kafka throughput
-        const tp = (data.metrics && data.metrics.throughput) || {};
-        document.getElementById('throughput').textContent = JSON.stringify(tp, null, 2);
+      var mlChart;
+      function refresh() {
+        try {
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', '/api/summary', true);
+          xhr.setRequestHeader('Cache-Control', 'no-cache');
+          xhr.onreadystatechange = function() {
+            if (xhr.readyState === 4) {
+              if (xhr.status !== 200) {
+                console && console.error && console.error('API error', xhr.status);
+                return;
+              }
+              var data;
+              try {
+                data = JSON.parse(xhr.responseText);
+              } catch (e) {
+                console && console.error && console.error('JSON parse error', e);
+                return;
+              }
+              document.getElementById('updated').textContent = 'Updated: ' + new Date(data.timestamp).toLocaleString();
+              var ml = data.ml || {};
+              var total = ml.total || 0;
+              var benign = ml.benign || 0;
+              var attack = ml.attack || 0;
+              var avgConf = (ml.avg_confidence || 0).toFixed ? (ml.avg_confidence || 0).toFixed(3) : (ml.avg_confidence || 0);
+              document.getElementById('mlStats').textContent = 'Total: ' + total + ' | Benign: ' + benign + ' | Attack: ' + attack + ' | Avg conf: ' + avgConf;
+              var ctx = document.getElementById('mlChart');
+              var chartData = {labels: ['BENIGN', 'ATTACK'], datasets: [{label: 'Predictions', data: [benign, attack], backgroundColor: ['#2a9d8f', '#e76f51']}]};
+              if (window.Chart) {
+                if (!mlChart) {
+                  mlChart = new Chart(ctx, { type: 'bar', data: chartData, options: { responsive: true, plugins: { legend: { display: false }}}});
+                } else {
+                  mlChart.data = chartData; mlChart.update();
+                }
+              }
+              var suri = data.suricata_alerts || {};
+              document.getElementById('suriCount').textContent = suri.alerts || 0;
+              document.getElementById('suriRecent').textContent = (suri.recent || []).join('\n');
+              var sys = (data.metrics && data.metrics.system) || {};
+              var cpu = sys.cpu_percent || 0;
+              var memp = sys.memory_percent || 0;
+              var memb = sys.memory_mb || 0;
+              document.getElementById('sysStats').textContent = 'CPU: ' + (cpu.toFixed ? cpu.toFixed(1) : cpu) + '% | Mem: ' + (memp.toFixed ? memp.toFixed(1) : memp) + '% (' + (memb.toFixed ? memb.toFixed(0) : memb) + ' MB)';
+              var lat = (data.metrics && data.metrics.latency) || {};
+              var p95 = lat.p95_ms || 0;
+              document.getElementById('latencyP95').textContent = (p95.toFixed ? p95.toFixed(2) : p95) + ' ms';
+              var feat = data.feature_engine || {};
+              document.getElementById('featCount').textContent = feat.approx_events || 0;
+              document.getElementById('featRecent').textContent = (feat.recent_lines || []).join('');
+              var sml = data.suricata_ml || {};
+              document.getElementById('suriMlStats').textContent = 'Total: ' + (sml.total||0) + ' | Attack: ' + (sml.attack||0) + ' | Benign: ' + (sml.benign||0);
+              var tp = (data.metrics && data.metrics.throughput) || {};
+              document.getElementById('throughput').textContent = JSON.stringify(tp, null, 2);
+            }
+          };
+          xhr.send();
+        } catch (e) {
+          console && console.error && console.error('Refresh failed', e);
+        }
       }
       refresh();
       setInterval(refresh, 2000);

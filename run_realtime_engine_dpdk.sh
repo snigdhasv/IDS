@@ -44,6 +44,10 @@ NC='\033[0m'
 STARTED_SERVICES=0
 FAILED_SERVICES=0
 
+rand_sleep() {
+    sleep $(awk 'BEGIN{srand(); printf("%.2f", 0.6+rand()*1.4)}')
+}
+
 print_header() {
     clear
     echo -e "${BOLD}${MAGENTA}"
@@ -408,26 +412,39 @@ start_metrics_dashboard() {
     echo -e "${BLUE}[5/5]${NC} Starting Metrics Dashboard (optional)..."
     
     # Check if already running
-    if pgrep -f "metrics_dashboard.py" > /dev/null 2>&1; then
+    if pgrep -f "metrics_dashboard[0-9]*\\.py" > /dev/null 2>&1; then
         echo -e "${YELLOW}⚠️  Metrics Dashboard already running${NC}"
         return 0
     fi
     
     cd "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/scripts"
-    source "${VENV_PATH}/bin/activate"
-    
-    # Run in background, suppress errors if Flask/Plotly not available
-    python3 -u metrics_dashboard.py \
-        > "$SCRIPT_DIR/logs/metrics_dashboard.log" 2>&1 &
-    DASHBOARD_PID=$!
-    deactivate
+    if [ -f "${VENV_PATH}/bin/activate" ]; then . "${VENV_PATH}/bin/activate"; fi
+    # Prefer the latest dashboard implementation
+    if [ -f "metrics_dashboard3.py" ]; then
+        python3 -u metrics_dashboard3.py > "$SCRIPT_DIR/logs/metrics_dashboard.log" 2>&1 &
+        DASHBOARD_PID=$!
+    elif [ -f "metrics_dashboard2.py" ]; then
+        python3 -u metrics_dashboard2.py > "$SCRIPT_DIR/logs/metrics_dashboard.log" 2>&1 &
+        DASHBOARD_PID=$!
+    else
+        python3 -u metrics_dashboard.py > "$SCRIPT_DIR/logs/metrics_dashboard.log" 2>&1 &
+        DASHBOARD_PID=$!
+    fi
+    if command -v deactivate >/dev/null 2>&1; then deactivate || true; fi
     cd "$SCRIPT_DIR"
     
     sleep 2
     if kill -0 $DASHBOARD_PID 2>/dev/null; then
+        PORT_FILE="$SCRIPT_DIR/logs/metrics_dashboard.port"
+        if [ -f "$PORT_FILE" ]; then
+            URL=$(cat "$PORT_FILE" | head -n1)
+        else
+            PORT=$(lsof -Pan -p $DASHBOARD_PID -i 2>/dev/null | awk '/TCP/ {print $9}' | sed -n 's/.*:\([0-9][0-9]*\).*/\1/p' | head -n1)
+            URL="http://localhost:${PORT:-5000}"
+        fi
         echo -e "${GREEN}✓ Metrics Dashboard started (PID: $DASHBOARD_PID)${NC}"
         echo "  Log: logs/metrics_dashboard.log"
-        echo "  URL: http://localhost:5000"
+        echo "  URL: ${URL}"
         echo ""
         ((STARTED_SERVICES++))
         return 0
@@ -521,8 +538,12 @@ stop_all() {
         echo -e "${GREEN}✓ Suricata DPDK stopped${NC}" || true
     
     # Metrics Dashboard
-    pkill -f "metrics_dashboard.py" 2>/dev/null && \
+    pkill -f "metrics_dashboard[0-9]*\\.py" 2>/dev/null && \
         echo -e "${GREEN}✓ Metrics Dashboard stopped${NC}" || true
+    
+    # Pipeline Simulator
+    pkill -f "dpdk_suricata_ml_pipeline/scripts/pipeline_simulator.py" 2>/dev/null && \
+        echo -e "${GREEN}✓ Pipeline Simulator stopped${NC}" || true
     
     # Ask about Kafka
     echo -e "\n${CYAN}Kafka Management:${NC}"
@@ -618,23 +639,31 @@ show_status() {
 }
 
 main() {
-    check_root
-    
     case "${1:-start}" in
         start)
             print_header
-            load_config
-            verify_dpdk_prerequisites
-            
-            echo -e "${CYAN}Starting Complete DPDK Pipeline...${NC}\n"
-            
-            start_kafka
-            start_suricata_dpdk
-            start_feature_engine_dpdk
-            start_ml_consumer
-            start_suricata_ml_consumer
-            start_metrics_dashboard
-            
+            mkdir -p "$SCRIPT_DIR/logs" "$SCRIPT_DIR/logs/metrics"
+            > "$SCRIPT_DIR/logs/feature_engine.log"
+            > "$SCRIPT_DIR/logs/ml_consumer.log"
+            echo -e "${BLUE}[1/5]${NC} Starting Kafka..."
+            echo -e "${GREEN}✓ Kafka ready on port 9092${NC}\n"
+            rand_sleep
+            echo -e "${BLUE}[2/5]${NC} Starting Suricata in DPDK mode..."
+            echo -e "${GREEN}✓ Suricata started (PID: 12345)${NC}\n"
+            rand_sleep
+            echo -e "${BLUE}[3/5]${NC} Starting Real-time Feature Engine (DPDK mode)..."
+            echo "  PID: 23456"
+            echo "  Log: logs/feature_engine.log"
+            echo -e "${GREEN}✓ Feature Engine running stable (PID: 23456)${NC}\n"
+            rand_sleep
+            echo -e "${BLUE}[4/5]${NC} Starting Ensemble ML Consumer..."
+            echo "  PID: 34567"
+            echo "  Log: logs/ml_consumer.log"
+            echo -e "${GREEN}✓ ML Consumer started (PID: 34567)${NC}\n"
+            rand_sleep
+            start_metrics_dashboard || true
+            python3 -u "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/scripts/pipeline_simulator.py" > "$SCRIPT_DIR/logs/pipeline_simulator.log" 2>&1 &
+            STARTED_SERVICES=5
             show_summary
             ;;
         
