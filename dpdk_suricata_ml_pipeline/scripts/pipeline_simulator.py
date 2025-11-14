@@ -16,6 +16,7 @@ SURICATA_ML_LOG = LOGS / 'suricata_ml_consumer.log'
 SRC_IP = os.getenv('SIM_SRC_IP', '192.168.20.1')
 DST_IP = os.getenv('SIM_DST_IP', '192.168.20.2')
 SIM_PROFILE = os.getenv('SIM_PROFILE', 'FridayPM-PortScan')
+ENSEMBLE_MODE = os.getenv('SIM_ENSEMBLE_MODE', '0') == '1'
 ATTACK_PROFILES = {
     'Tuesday': ['FTP-Patator', 'SSH-Patator'],
     'Wednesday': ['GoldenEye', 'Hulk', 'Slowhttptest', 'Slowloris', 'Heartbleed'],
@@ -96,7 +97,23 @@ def run():
     attack_total = 0
     high_conf_total = 0
     with open(ML_LOG, 'a', buffering=1) as mlf:
-        mlf.write(f"{ts()} - __main__ - INFO - ML Enhanced Kafka Consumer initialized\n")
+        if ENSEMBLE_MODE:
+            # Match EXACT format from realtime_ensemble_consumer.py
+            mlf.write(f"{ts()} - 🔄 Loading ensemble models...\n")
+            mlf.write(f"{ts()} -   [1/5] ✓ random_forest_model_2017_raw.joblib\n")
+            mlf.write(f"{ts()} -   [2/5] ✓ decision_tree_model_2017_raw.joblib\n")
+            mlf.write(f"{ts()} -   [3/5] ✓ lgb_model_2017_raw.joblib\n")
+            mlf.write(f"{ts()} -   [4/5] ✓ knn_model_2017_raw.joblib\n")
+            mlf.write(f"{ts()} -   [5/5] ✓ lr_model_2017_raw.joblib\n")
+            mlf.write(f"{ts()} - ✓ Loaded 5/5 models for ensemble\n")
+            mlf.write(f"{ts()} - ✓ Loaded feature scaler from scaler_2017_raw.joblib\n")
+            mlf.write(f"{ts()} - ✓ Connected to Kafka: ml-features\n")
+            mlf.write(f"{ts()} - 🚀 Starting Ensemble ML Consumer\n")
+            mlf.write(f"{ts()} -    Consuming from: ml-features\n")
+            mlf.write(f"{ts()} -    Ensemble size: 5\n")
+            mlf.write(f"{ts()} - \n")
+        else:
+            mlf.write(f"{ts()} - __main__ - INFO - ML Enhanced Kafka Consumer initialized\n")
     while True:
         lines = read_ps()
         info = parse_tcpreplay(lines)
@@ -149,33 +166,53 @@ def run():
             src_port = random.randint(1024, 65535)
             dst_port = random.choice([80, 443, 22, 53, 445, random.randint(1024, 65535)])
             flow_desc = f"{src_ip}:{src_port} → {dst_ip}:{dst_port}"
-            with open(ML_LOG, 'a', buffering=1) as mlf:
-                if is_benign:
-                    mlf.write(f"{ts()} - __main__ - INFO - ML Benign: BENIGN (confidence: {conf:.2%}) - {flow_desc}\n")
-                    write_jsonl(metrics_path, {
-                        'type': 'ml',
-                        'timestamp': datetime.now().isoformat(),
-                        'model_name': 'ensemble',
-                        'inference_time_ms': round(random.uniform(2.0, 7.0), 3),
-                        'prediction': 'BENIGN',
-                        'confidence': round(conf, 4),
-                        'features_count': 34,
-                        'batch_size': 1
-                    })
-                else:
-                    types = ATTACK_PROFILES.get(SIM_PROFILE, ['PortScan'])
-                    attack_type = random.choice(types)
-                    mlf.write(f"{ts()} - __main__ - INFO - ML Alert: Attack-{attack_type} (confidence: {conf:.2%}) - {flow_desc}\n")
-                    write_jsonl(metrics_path, {
-                        'type': 'ml',
-                        'timestamp': datetime.now().isoformat(),
-                        'model_name': 'ensemble',
-                        'inference_time_ms': round(random.uniform(2.0, 7.0), 3),
-                        'prediction': f'Attack-{attack_type}',
-                        'confidence': round(conf, 4),
-                        'features_count': 34,
-                        'batch_size': 1
-                    })
+            
+            if ENSEMBLE_MODE:
+                # Match EXACT format from realtime_ensemble_consumer.py
+                agreement = random.uniform(0.85, 0.98)  # High agreement (models voting together)
+                num_models = 5
+                votes = int(agreement * num_models)  # Number of models that agreed
+                
+                with open(ML_LOG, 'a', buffering=1) as mlf:
+                    if is_benign:
+                        # Format: ✓ BENIGN | Confidence: XX.X% | Agreement: XX.X% (X/5) | Flow: IP:port
+                        mlf.write(f"{ts()} - ✓ BENIGN | "
+                                 f"Confidence: {conf:.1%} | "
+                                 f"Agreement: {agreement:.1%} ({votes}/{num_models}) | "
+                                 f"Flow: {flow_desc}\n")
+                    else:
+                        types = ATTACK_PROFILES.get(SIM_PROFILE, ['PortScan'])
+                        attack_type = random.choice(types)
+                        # Format: 🚨 Attack | Confidence: XX.X% | Agreement: XX.X% (X/5) | Flow: IP:port
+                        mlf.write(f"{ts()} - 🚨 {attack_type} | "
+                                 f"Confidence: {conf:.1%} | "
+                                 f"Agreement: {agreement:.1%} ({votes}/{num_models}) | "
+                                 f"Flow: {flow_desc}\n")
+            else:
+                # Original single-model format
+                with open(ML_LOG, 'a', buffering=1) as mlf:
+                    if is_benign:
+                        mlf.write(f"{ts()} - __main__ - INFO - ML Benign: BENIGN (confidence: {conf:.2%}) - {flow_desc}\n")
+                    else:
+                        types = ATTACK_PROFILES.get(SIM_PROFILE, ['PortScan'])
+                        attack_type = random.choice(types)
+                        mlf.write(f"{ts()} - __main__ - INFO - ML Alert: Attack-{attack_type} (confidence: {conf:.2%}) - {flow_desc}\n")
+            
+            # Metrics (same for both modes)
+            if not is_benign:
+                types = ATTACK_PROFILES.get(SIM_PROFILE, ['PortScan'])
+                attack_type = random.choice(types)
+                write_jsonl(metrics_path, {
+                    'type': 'ml',
+                    'timestamp': datetime.now().isoformat(),
+                    'model_name': 'ensemble' if ENSEMBLE_MODE else 'single',
+                    'inference_time_ms': round(random.uniform(2.0, 7.0), 3),
+                    'prediction': f'Attack-{attack_type}',
+                    'confidence': round(conf, 4),
+                    'features_count': 67 if ENSEMBLE_MODE else 34,
+                    'batch_size': 1
+                })
+            
             if label == 'BENIGN':
                 benign_count += 1
                 benign_total += 1
@@ -187,7 +224,10 @@ def run():
             time.sleep(max(0.0, (1.0 / max(ml_lines_per_sec,1)) * 0.9))
         if ml_seq % 100 == 0:
             with open(ML_LOG, 'a', buffering=1) as mlf:
-                mlf.write(f"{ts()} - __main__ - INFO - Processed: {ml_seq} | Benign: {benign_total} | Attacks: {attack_total} | High-conf: {high_conf_total}\n")
+                if ENSEMBLE_MODE:
+                    mlf.write(f"{ts()} - 📊 Processed: {ml_seq} | Benign: {benign_total} | Attacks: {attack_total} | High-conf: {high_conf_total}\n")
+                else:
+                    mlf.write(f"{ts()} - __main__ - INFO - Processed: {ml_seq} | Benign: {benign_total} | Attacks: {attack_total} | High-conf: {high_conf_total}\n")
         for j in range(feat_lines_per_sec):
             total_packets += int(pps / feat_lines_per_sec)
             flows = max(1, int(total_packets / 15000))

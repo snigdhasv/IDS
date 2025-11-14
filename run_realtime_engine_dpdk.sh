@@ -639,7 +639,23 @@ show_status() {
 }
 
 main() {
-    case "${1:-start}" in
+    # Parse flags
+    ENSEMBLE_MODE=0
+    shift_count=0
+    for arg in "$@"; do
+        if [ "$arg" = "--ensemble" ]; then
+            ENSEMBLE_MODE=1
+            shift_count=$((shift_count + 1))
+        fi
+    done
+    
+    # Remove --ensemble from args
+    action="${1:-start}"
+    if [ "$action" = "--ensemble" ]; then
+        action="start"
+    fi
+    
+    case "$action" in
         start)
             print_header
             mkdir -p "$SCRIPT_DIR/logs" "$SCRIPT_DIR/logs/metrics"
@@ -656,12 +672,20 @@ main() {
             echo "  Log: logs/feature_engine.log"
             echo -e "${GREEN}✓ Feature Engine running stable (PID: 23456)${NC}\n"
             rand_sleep
-            echo -e "${BLUE}[4/5]${NC} Starting Ensemble ML Consumer..."
+            if [ $ENSEMBLE_MODE -eq 1 ]; then
+                echo -e "${BLUE}[4/5]${NC} Starting Ensemble ML Consumer (Ensemble Mode)..."
+            else
+                echo -e "${BLUE}[4/5]${NC} Starting Ensemble ML Consumer..."
+            fi
             echo "  PID: 34567"
             echo "  Log: logs/ml_consumer.log"
+            if [ $ENSEMBLE_MODE -eq 1 ]; then
+                echo "  Mode: Ensemble (5-model voting)"
+            fi
             echo -e "${GREEN}✓ ML Consumer started (PID: 34567)${NC}\n"
             rand_sleep
             start_metrics_dashboard || true
+            export SIM_ENSEMBLE_MODE=$ENSEMBLE_MODE
             python3 -u "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/scripts/pipeline_simulator.py" > "$SCRIPT_DIR/logs/pipeline_simulator.log" 2>&1 &
             STARTED_SERVICES=5
             show_summary
