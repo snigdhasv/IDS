@@ -6,6 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/../config/pipeline.conf"
+PID_FILE="/var/run/suricata-dpdk.pid"
 
 # Colors
 RED='\033[0;31m'
@@ -35,59 +36,110 @@ else
     exit 1
 fi
 
-# Check if Suricata is installed
-if ! command -v suricata &> /dev/null; then
-    echo -e "${RED}❌ Suricata not installed${NC}"
-    exit 1
-fi
-
-# Check DPDK support
-if ! suricata --build-info | grep -q "DPDK support.*yes"; then
-    echo -e "${RED}❌ Suricata not compiled with DPDK support${NC}"
-    echo "Run: suricata --build-info | grep DPDK"
-    exit 1
-fi
-
-echo -e "${GREEN}✓ Suricata with DPDK support detected${NC}"
-
-# Note: We're using AF_PACKET mode (kernel driver), which works fine for IDS
-# Pure DPDK PMD mode requires explicit driver binding (optional for this setup)
-
-# Check Kafka is running
-# Use ss if netstat is not available
-if command -v netstat &> /dev/null; then
-    KAFKA_RUNNING=$(netstat -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
-else
-    KAFKA_RUNNING=$(ss -tuln 2>/dev/null | grep -q ":9092" && echo "yes" || echo "no")
-fi
-
-if [ "$KAFKA_RUNNING" != "yes" ]; then
-    echo -e "${YELLOW}⚠️  Kafka not running - continuing without Kafka output${NC}"
-fi
-
-# Create Suricata config if needed
-SURICATA_CONFIG_DIR="$(dirname "$SURICATA_CONFIG")"
-mkdir -p "$SURICATA_CONFIG_DIR"
-
-if [ ! -f "$SURICATA_CONFIG" ]; then
-    echo -e "\n${BLUE}Creating Suricata DPDK configuration...${NC}"
-    
-    # Copy default config
-    if [ -f "/etc/suricata/suricata.yaml" ]; then
-        cp "/etc/suricata/suricata.yaml" "$SURICATA_CONFIG"
-    else
-        echo -e "${RED}❌ Default Suricata config not found${NC}"
+ensure_dpdk_binding() {
+    local devbind="$(command -v dpdk-devbind.py 2>/dev/null || echo "/usr/local/bin/dpdk-devbind.py")"
+    if [ ! -x "$devbind" ]; then
+        echo -e "${RED}❌ dpdk-devbind.py not found${NC}"
         exit 1
     fi
-    
-    # Append DPDK and Kafka configuration
-    cat >> "$SURICATA_CONFIG" << EOF
 
-# DPDK Configuration
+    if ! "$devbind" --status 2>/dev/null | grep -q "${INTERFACE_PCI_ADDRESS}.*drv="; then
+        echo -e "${RED}❌ Interface ${INTERFACE_PCI_ADDRESS} is not bound to a DPDK driver${NC}"
+        echo -e "    Use scripts/01_bind_interface.sh before starting Suricata"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Interface ${INTERFACE_PCI_ADDRESS} bound to DPDK${NC}"
+}
+
+ensure_hugepages() {
+    local hp_1g="/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages"
+    local hp_2m="/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages"
+    local target_mb="${DPDK_HUGEPAGES:-2048}"
+
+    # Ensure the configured value is a positive integer
+    if ! [[ "$target_mb" =~ ^[0-9]+$ ]] || [ "$target_mb" -le 0 ]; then
+        target_mb="2048"
+    fi
+
+    local page_file=""
+    local page_mb=""
+    local page_label=""
+
+    if [ -w "$hp_2m" ]; then
+        page_file="$hp_2m"
+        page_mb=2
+        page_label="2MB"
+    elif [ -w "$hp_1g" ]; then
+        page_file="$hp_1g"
+        page_mb=1024
+        page_label="1GB"
+    fi
+
+    if [ -z "$page_file" ]; then
+        echo -e "${YELLOW}⚠️  Unable to configure hugepages automatically${NC}"
+        return
+    fi
+
+    local target_pages=$(( (target_mb + page_mb - 1) / page_mb ))
+    if [ "$target_pages" -lt 1 ]; then
+        target_pages=1
+    fi
+
+    local current
+    current=$(cat "$page_file" 2>/dev/null || echo 0)
+    if [ "${current:-0}" -lt "$target_pages" ]; then
+        echo "$target_pages" > "$page_file"
+    fi
+
+    local configured_mb=$(( target_pages * page_mb ))
+    echo -e "${GREEN}✓ HugePages (${page_label}) available: $(cat "$page_file") (~${configured_mb}MB reserved, config asked for ${target_mb}MB)${NC}"
+}
+
+ensure_rule_file() {
+    local rule_dir="/etc/suricata/rules"
+    local rule_file="${rule_dir}/dpdk-minimal.rules"
+    mkdir -p "$rule_dir"
+    if [ ! -f "$rule_file" ]; then
+        cat > "$rule_file" <<'EOF'
+alert icmp any any -> any any (msg:"DPDK test rule"; sid:9000001; rev:1;)
+EOF
+        echo -e "${GREEN}✓ Created ${rule_file}${NC}"
+    fi
+}
+
+ensure_suricata_config() {
+    local config_dir="$(dirname "$SURICATA_CONFIG")"
+    mkdir -p "$config_dir"
+    if [ -f "$SURICATA_CONFIG" ]; then
+        return
+    fi
+
+    cat > "$SURICATA_CONFIG" <<EOF
+%YAML 1.1
+---
+# Auto-generated DPDK Suricata config
+vars:
+  address-groups:
+    HOME_NET: "${SURICATA_HOME_NET}"
+    EXTERNAL_NET: "${SURICATA_EXTERNAL_NET}"
+
+threading:
+  set-cpu-affinity: yes
+  cpu-affinity:
+    - management-cpu-set:
+        cpu: [ 0 ]
+    - receive-cpu-set:
+        cpu: [ 1, 2 ]
+    - worker-cpu-set:
+        cpu: [ 3, 4 ]
+
+stats:
+    enabled: yes
+    interval: 10
+
 dpdk:
   eal-params:
     proc-type: primary
-    
   interfaces:
     - interface: ${INTERFACE_PCI_ADDRESS}
       threads: ${SURICATA_CORES}
@@ -95,93 +147,78 @@ dpdk:
       cluster-type: cluster_flow
       promisc: yes
       checksum-checks: yes
-      copy-mode: ips
-      copy-iface: none
-      
-# Kafka Output
+
 outputs:
   - eve-log:
       enabled: yes
-      filetype: kafka
-      kafka:
-        bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
-        topic: ${KAFKA_TOPIC_ALERTS}
-        compression-codec: snappy
-        
+      filetype: regular
+      filename: /var/log/suricata/eve.json
       types:
-        - alert:
-            tagged-packets: yes
-            xff:
-              enabled: yes
-              mode: extra-data
-              deployment: reverse
-        - anomaly:
-            enabled: yes
-        - http:
-            extended: yes
-        - dns:
-            query: yes
-            answer: yes
-        - tls:
-            extended: yes
-        - files:
-            force-magic: yes
-        - flow:
-            # Enable flow logging for ML feature extraction
-            # This logs ALL network flows (not just alerts)
-        - stats:
-            totals: yes
-            threads: yes
-            deltas: yes
+        - alert
+        - flow
+        - dns
+        - tls
+        - stats
 
-# Network variables
-vars:
-  address-groups:
-    HOME_NET: "${SURICATA_HOME_NET}"
-    EXTERNAL_NET: "${SURICATA_EXTERNAL_NET}"
-
-# Performance tuning
-af-packet:
-  - interface: default
-    cluster-id: 99
-    cluster-type: cluster_flow
-    defrag: yes
-    use-mmap: yes
-    mmap-locked: yes
-    tpacket-v3: yes
-    ring-size: 2048
-    block-size: 32768
-
-# Rules
+default-rule-path: /etc/suricata/rules
 rule-files:
-  - /etc/suricata/rules/suricata.rules
+  - dpdk-minimal.rules
 
-# Advanced options
 stream:
-  memcap: 256mb
+  memcap: 64mb
   checksum-validation: yes
-  inline: auto
-  reassembly:
-    memcap: 512mb
-    depth: 1mb
-    toserver-chunk-size: 2560
-    toclient-chunk-size: 2560
 
+logging:
+  default-log-level: info
+  outputs:
+    - file:
+        enabled: yes
+        filename: /var/log/suricata/suricata.log
 EOF
-    
-    echo -e "${GREEN}✓ Configuration created: $SURICATA_CONFIG${NC}"
+    echo -e "${GREEN}✓ Generated ${SURICATA_CONFIG}${NC}"
+}
+
+wait_for_port() {
+    local port=$1
+    if command -v netstat &> /dev/null; then
+        netstat -tuln 2>/dev/null | grep -q ":${port}" && return 0
+    else
+        ss -tuln 2>/dev/null | grep -q ":${port}" && return 0
+    fi
+    return 1
+}
+
+# Check if Suricata is installed
+if ! command -v suricata &> /dev/null; then
+    echo -e "${RED}❌ Suricata not installed${NC}"
+    exit 1
 fi
 
-# Create log directory
+if ! suricata --build-info | grep -q "DPDK support.*yes"; then
+    echo -e "${RED}❌ Suricata not compiled with DPDK support${NC}"
+    exit 1
+fi
+
+ensure_dpdk_binding
+ensure_hugepages
+ensure_rule_file
+ensure_suricata_config
+
+# Check Kafka (optional)
+if ! wait_for_port 9092; then
+    echo -e "${YELLOW}⚠️  Kafka not running on port 9092 - continuing${NC}"
+else
+    echo -e "${GREEN}✓ Kafka detected on port 9092${NC}"
+fi
+
 mkdir -p "$SURICATA_LOG_DIR"
 
-# Check if already running
-if pgrep -x "suricata" > /dev/null; then
-    echo -e "${YELLOW}⚠️  Suricata already running${NC}"
+if pgrep -f "suricata.*--dpdk" > /dev/null 2>&1; then
+    echo -e "${YELLOW}⚠️  Suricata (DPDK) already running${NC}"
     read -p "Kill existing process? (y/N): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        killall suricata 2>/dev/null || true
+        pkill -f "suricata.*--dpdk" 2>/dev/null || true
         sleep 2
     else
         echo "Aborted."
@@ -189,56 +226,39 @@ if pgrep -x "suricata" > /dev/null; then
     fi
 fi
 
-# Start Suricata
-echo -e "\n${BOLD}${BLUE}Starting Suricata in AF_PACKET mode (DPDK-optimized)...${NC}"
-echo -e "${CYAN}Config: /etc/suricata/suricata.yaml.dpdk${NC}"
-echo -e "${CYAN}Log Dir: $SURICATA_LOG_DIR${NC}"
-echo
+if [[ -f "$PID_FILE" ]]; then
+    PID_FROM_FILE=$(cat "$PID_FILE" 2>/dev/null || true)
+    if [[ -n "$PID_FROM_FILE" ]] && kill -0 "$PID_FROM_FILE" 2>/dev/null; then
+        echo -e "${YELLOW}⚠️  PID file $PID_FILE indicates Suricata is still running (PID: $PID_FROM_FILE)${NC}"
+        echo -e "    Use scripts/stop_all.sh or stop the process before restarting."
+        exit 1
+    fi
+    echo -e "${YELLOW}⚠️  Removing stale PID file: $PID_FILE${NC}"
+    rm -f "$PID_FILE" 2>/dev/null || true
+fi
 
-# Start Suricata in background (AF_PACKET mode on enp3s0 interface)
-# Note: Skip config test as minimal configs may not have all rules enabled
-mkdir -p "$SURICATA_LOG_DIR"
-nohup suricata -i enp3s0 -c /etc/suricata/suricata.yaml \
-    -l "$SURICATA_LOG_DIR" \
-    --pidfile /var/run/suricata-dpdk.pid \
-    > "${SURICATA_LOG_DIR}/suricata.out" 2>&1 &
+LOG_OUT="${SURICATA_LOG_DIR}/suricata-dpdk.out"
+echo -e "\n${BOLD}${BLUE}Starting Suricata in DPDK mode...${NC}"
+echo -e "  Config: ${SURICATA_CONFIG}"
+echo -e "  Logs:   ${SURICATA_LOG_DIR}"
+echo -e "  PCI:    ${INTERFACE_PCI_ADDRESS}"
+
+nohup suricata --dpdk -c "$SURICATA_CONFIG" -l "$SURICATA_LOG_DIR" \
+    --pidfile "$PID_FILE" \
+    > "$LOG_OUT" 2>&1 &
 
 SURICATA_PID=$!
 sleep 3
 
-# Verify it's running
-if ps -p $SURICATA_PID > /dev/null; then
+if kill -0 $SURICATA_PID 2>/dev/null; then
     echo -e "${GREEN}✓ Suricata started (PID: $SURICATA_PID)${NC}"
 else
     echo -e "${RED}❌ Suricata failed to start${NC}"
-    echo "Check logs: tail -f ${SCRIPT_DIR}/../logs/suricata/suricata.out"
+    echo "  Check log: tail -n 50 $LOG_OUT"
     exit 1
 fi
 
-echo -e "\n${BOLD}${GREEN}╔════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${GREEN}║  Suricata Started Successfully                 ║${NC}"
-echo -e "${BOLD}${GREEN}╚════════════════════════════════════════════════╝${NC}"
-echo
-
-echo -e "${BOLD}Process Info:${NC}"
-echo -e "  PID: ${CYAN}$SURICATA_PID${NC}"
-echo -e "  Config: ${CYAN}$SURICATA_CONFIG${NC}"
-echo -e "  Logs: ${CYAN}$SURICATA_LOG_DIR${NC}"
-echo
-
-echo -e "${BOLD}Monitor Logs:${NC}"
-echo -e "  ${CYAN}tail -f $SURICATA_LOG_DIR/suricata.log${NC}"
-echo -e "  ${CYAN}tail -f $SURICATA_LOG_DIR/eve.json${NC}"
-echo -e "  ${CYAN}tail -f $SURICATA_LOG_DIR/stats.log${NC}"
-echo
-
-echo -e "${BOLD}Check Stats:${NC}"
-echo -e "  ${CYAN}suricatasc -c stats${NC}"
-echo
-
-echo -e "${BOLD}Kafka Output:${NC}"
-echo -e "  Topic: ${CYAN}$KAFKA_TOPIC_ALERTS${NC}"
-echo -e "  Monitor: ${CYAN}kafka-console-consumer.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVERS --topic $KAFKA_TOPIC_ALERTS${NC}"
-echo
-
-echo -e "${GREEN}✓ Done!${NC}"
+echo -e "\n${BOLD}${GREEN}Suricata DPDK is running${NC}"
+echo -e "  eve.json : /var/log/suricata/eve.json"
+echo -e "  monitor  : tail -f $LOG_OUT"
+echo -e "  stats    : suricatasc -c stats"
