@@ -2,10 +2,10 @@
 ################################################################################
 # Send Test Traffic to IDS
 ################################################################################
-# Sends PCAP traffic from Realtek NIC to Intel NIC for IDS testing
+# Sends PCAP traffic to Intel NIC for IDS testing
 ################################################################################
 
-REALTEK_NIC="enp5s0"
+REALTEK_NIC="enp1s0"
 PCAP_DIR="dpdk_suricata_ml_pipeline/pcap_samples"
 
 # Colors
