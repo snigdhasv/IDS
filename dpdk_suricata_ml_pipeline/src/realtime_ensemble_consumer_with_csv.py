@@ -21,13 +21,15 @@ import signal
 import warnings
 import os
 import csv
-from typing import Dict, List, Tuple
+import time
+from typing import Any, Dict, List, Tuple
 from pathlib import Path
 from collections import Counter
 from datetime import datetime
 from kafka import KafkaConsumer
 from kafka.errors import KafkaError
 import numpy as np
+from metrics_logger import MetricsLogger
 
 # Suppress ALL warnings (sklearn feature name warnings)
 warnings.filterwarnings('ignore')
@@ -96,7 +98,18 @@ LABEL_MAP = {
     0: "BENIGN",
     1: "Attack"
 }
-LABEL_MAP_REVERSE = {v: k for k, v in LABEL_MAP.items()}
+
+def normalize_label(raw_label: Any) -> str:
+    """Return a printable label for predictions/ground-truth values."""
+    if raw_label is None:
+        return "UNKNOWN"
+    # Numeric labels → look up in LABEL_MAP, else keep numeric representation
+    if isinstance(raw_label, (int, np.integer)):
+        return LABEL_MAP.get(int(raw_label), str(raw_label))
+    # scikit-learn models trained on strings already output human-readable classes
+    if isinstance(raw_label, str):
+        return raw_label
+    return str(raw_label)
 
 
 class EnsembleMLConsumerWithCSV:
@@ -158,6 +171,11 @@ class EnsembleMLConsumerWithCSV:
         # Initialize CSV logging
         if csv_output:
             self._init_csv(csv_output)
+
+        # Metrics logger (records JSON/CSV for dashboard)
+        self.metrics_logger = MetricsLogger(enable_console=False, enable_file=True, enable_csv=True)
+        self.metrics_logger.start()
+        logger.info(f"✓ Metrics logging enabled (dir: {self.metrics_logger.metrics_dir})")
         
         # Statistics
         self.stats = {
@@ -244,12 +262,14 @@ class EnsembleMLConsumerWithCSV:
             self.consumer.close()
             if self.csv_file:
                 self.csv_file.close()
+            self.metrics_logger.stop()
             logger.info(f"✅ Consumer stopped. Final stats: {self.stats}")
     
     def _process_message(self, data: Dict):
         """Process feature vector with ensemble voting"""
         try:
             self.stats['total'] += 1
+            inference_start = time.perf_counter()
             
             # Extract features dictionary from engine
             features_dict = data['features']
@@ -288,7 +308,7 @@ class EnsembleMLConsumerWithCSV:
                     predictions.append(pred)
                     confidences.append(conf)
                     all_predictions[model_name] = {
-                        'pred': LABEL_MAP.get(pred, str(pred)),
+                        'pred': normalize_label(pred),
                         'conf': float(conf)
                     }
                 except Exception as e:
@@ -309,6 +329,7 @@ class EnsembleMLConsumerWithCSV:
             agreeing_confidences = [conf for pred, conf in zip(predictions, confidences) 
                                    if pred == final_prediction]
             avg_confidence = np.mean(agreeing_confidences) if agreeing_confidences else 0.0
+            inference_time_ms = (time.perf_counter() - inference_start) * 1000
             
             # Update confidence category
             if agreement >= 0.80:
@@ -319,17 +340,20 @@ class EnsembleMLConsumerWithCSV:
                 self.stats['low_confidence'] += 1
             
             # Count predictions
-            final_label = LABEL_MAP.get(final_prediction, "UNKNOWN")
-            if final_label == "BENIGN":
+            final_label = normalize_label(final_prediction)
+            if final_label.upper() == "BENIGN":
                 self.stats['benign'] += 1
-            elif final_label == "Attack":
+            elif final_label.upper() == "ATTACK":
+                self.stats['attacks'] += 1
+            else:
+                # Treat any other non-benign class as attack for stats
                 self.stats['attacks'] += 1
             
             # Check accuracy (if ground truth available)
             correct = None
             if ground_truth is not None:
-                gt_label = LABEL_MAP.get(ground_truth) if isinstance(ground_truth, int) else ground_truth
-                correct = (final_label == gt_label)
+                gt_label = normalize_label(ground_truth)
+                correct = (final_label.lower() == gt_label.lower())
                 if correct:
                     self.stats['correct'] += 1
                 else:
@@ -338,7 +362,7 @@ class EnsembleMLConsumerWithCSV:
             # Log prediction
             log_msg = f"[{self.stats['total']:6d}] {final_label:8s} (conf: {avg_confidence:.2%}, agree: {agreement:.0%})"
             if ground_truth is not None:
-                gt_label = LABEL_MAP.get(ground_truth) if isinstance(ground_truth, int) else ground_truth
+                gt_label = normalize_label(ground_truth)
                 accuracy_marker = "✓" if correct else "✗"
                 log_msg += f" | GT: {gt_label:8s} {accuracy_marker}"
             logger.info(log_msg)
@@ -349,7 +373,7 @@ class EnsembleMLConsumerWithCSV:
                     csv_row = {
                         'timestamp': datetime.now().isoformat(),
                         'flow_id': flow_id,
-                        'ground_truth': LABEL_MAP.get(ground_truth, '') if ground_truth is not None else '',
+                        'ground_truth': normalize_label(ground_truth) if ground_truth is not None else '',
                         'ensemble_prediction': final_label,
                         'ensemble_confidence': f"{avg_confidence:.4f}",
                         'agreement_ratio': f"{agreement:.4f}",
@@ -368,6 +392,17 @@ class EnsembleMLConsumerWithCSV:
                     self.csv_file.flush()
                 except Exception as e:
                     logger.error(f"❌ CSV write failed: {e}")
+
+            # Log structured metrics for dashboard
+            self.metrics_logger.log_ml_inference(
+                model_name='realtime_ensemble',
+                inference_time_ms=inference_time_ms,
+                prediction=final_label,
+                confidence=avg_confidence,
+                features_count=feature_vector.shape[1],
+                batch_size=1
+            )
+            self.metrics_logger.log_throughput(component='ml_consumer', events_count=1)
         
         except Exception as e:
             logger.error(f"❌ Error processing message: {e}")
