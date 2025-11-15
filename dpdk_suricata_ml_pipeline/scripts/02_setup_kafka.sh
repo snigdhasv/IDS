@@ -31,6 +31,31 @@ else
     KAFKA_TOPIC_ML_PREDICTIONS="ml-predictions"
 fi
 
+# Default Kafka/Scala versions (override via env vars)
+: "${KAFKA_VERSION:=3.8.0}"
+: "${SCALA_VERSION:=2.13}"
+KAFKA_TGZ="kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
+PRIMARY_URL="https://downloads.apache.org/kafka/${KAFKA_VERSION}/${KAFKA_TGZ}"
+ARCHIVE_URL="https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/${KAFKA_TGZ}"
+MIRROR_URL="https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/${KAFKA_TGZ}"
+
+download_kafka_release() {
+    local url
+    local target="${1}"
+    for url in "$PRIMARY_URL" "$ARCHIVE_URL" "$MIRROR_URL"; do
+        if [ -z "$url" ]; then
+            continue
+        fi
+        echo -e "${BLUE}Downloading Kafka from ${url}...${NC}"
+        if wget --progress=dot:giga -O "$target" "$url"; then
+            return 0
+        fi
+        echo -e "${YELLOW}⚠️  Download failed from ${url}. Trying next mirror...${NC}"
+    done
+    echo -e "${RED}❌ Unable to download Kafka ${KAFKA_VERSION}. Check your network or update the mirrors.${NC}"
+    return 1
+}
+
 # Check if Kafka is already installed
 # Check multiple possible locations
 KAFKA_DIR=""
@@ -57,17 +82,18 @@ fi
 
 # Install Kafka if needed
 if [ "$KAFKA_INSTALLED" = false ]; then
-    KAFKA_VERSION="3.6.0"
-    SCALA_VERSION="2.13"
     KAFKA_DIR="/opt/kafka"
+    TMP_TGZ="/tmp/${KAFKA_TGZ}"
     
-    echo -e "\n${BLUE}Downloading Kafka ${KAFKA_VERSION}...${NC}"
-    cd /tmp
-    wget -q --show-progress "https://downloads.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
+    rm -f "$TMP_TGZ"
+    if ! download_kafka_release "$TMP_TGZ"; then
+        exit 1
+    fi
     
     echo -e "${BLUE}Installing Kafka...${NC}"
-    sudo tar -xzf "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz" -C /opt/
+    sudo tar -xzf "$TMP_TGZ" -C /opt/
     sudo mv "/opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION}" "$KAFKA_DIR"
+    rm -f "$TMP_TGZ"
     
     # Add to PATH
     if ! grep -q "kafka/bin" ~/.bashrc; then
