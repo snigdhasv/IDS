@@ -31,12 +31,19 @@ bash dpdk_suricata_ml_pipeline/scripts/01_bind_interface.sh
 bash dpdk_suricata_ml_pipeline/scripts/04_configure_dpdk_input.sh
 
 # Start full pipeline (requires sudo)
+# Use an explicit path when invoking it under sudo to avoid "command not found" errors
+sudo ./run_realtime_engine_dpdk.sh start
+# Alternative (runs via bash, which also resolves the script path):
 sudo bash run_realtime_engine_dpdk.sh start
 
 # Check status
+sudo ./run_realtime_engine_dpdk.sh status
+# Alternative:
 sudo bash run_realtime_engine_dpdk.sh status
 
 # Stop all
+sudo ./run_realtime_engine_dpdk.sh stop
+# Alternative:
 sudo bash run_realtime_engine_dpdk.sh stop
 ```
 
