@@ -20,6 +20,7 @@ import json
 import socket
 import struct
 import signal
+import os
 from pathlib import Path
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -132,7 +133,8 @@ class DPDKFeatureEngine:
     def __init__(self):
         self.running = True
         self.flows: Dict[FlowKey, FlowStats] = {}
-        self.stats = {'packets': 0, 'flows': 0}
+        self.stats = {'packets': 0, 'flows': 0, 'total_packets': 0}
+        self._has_stats_packets = False
         
         # Kafka producer
         try:
@@ -284,23 +286,39 @@ class DPDKFeatureEngine:
         
         try:
             with open(eve_file, 'r') as f:
+                # Skip historical data to avoid replaying stale flows
+                f.seek(0, os.SEEK_END)
+                logger.info("📄 Attached to Suricata eve.json (tailing new entries only)")
+
                 while self.running:
                     line = f.readline()
                     
                     if line:
                         try:
                             event = json.loads(line)
-                            
-                            # Only process flow entries and extract features
-                            if event.get('event_type') == 'flow':
-                                self.stats['packets'] += 1
-                                
-                                # Extract CICIDS features from Suricata flow
+                            event_type = event.get('event_type')
+                            features = None
+
+                            if event_type == 'stats':
+                                stats_block = event.get('stats') or {}
+                                capture_stats = stats_block.get('capture') or {}
+                                # Use packets field for DPDK mode
+                                packets = capture_stats.get('packets', 0)
+                                self.stats['total_packets'] = packets
+                                self._has_stats_packets = True
+                                continue
+
+                            if event_type == 'flow':
+                                self.stats['flows'] += 1
+                                if not self._has_stats_packets:
+                                    flow_stats = event.get('flow') or {}
+                                    pkts = flow_stats.get('pkts_toserver', 0) + flow_stats.get('pkts_toclient', 0)
+                                    self.stats['total_packets'] += pkts
+
                                 features = self._extract_features_from_suricata_flow(event)
-                                
+
                                 if features and self.producer:
                                     try:
-                                        # Send extracted features to Kafka
                                         feature_message = {
                                             'features': features,
                                             'flow_id': event.get('flow_id'),
@@ -330,9 +348,39 @@ class DPDKFeatureEngine:
     def _run_dpdk_mode(self):
         """Run with actual DPDK packet capture"""
         logger.info("⚡ Using DPDK for direct packet capture")
-        # DPDK initialization would go here
-        # For now, fallback to EVE JSON reading
-        self._run_fallback_mode()
+        
+        try:
+            # Initialize DPDK
+            self.pydpdk = PyDPDK()
+            self.pydpdk.init_dpdk()
+            self.pydpdk.init_port(DPDK_PORT_ID, NUM_RX_DESC, NUM_TX_DESC)
+            
+            logger.info(f"✓ DPDK initialized on port {DPDK_PORT_ID}")
+            
+            while self.running:
+                # Receive packet burst
+                packets = self.pydpdk.rx_burst(DPDK_PORT_ID, BURST_SIZE)
+                
+                for pkt_data in packets:
+                    self.stats['packets'] += 1
+                    self.stats['total_packets'] = self.stats['packets']
+                    flow_key = self._parse_packet(pkt_data)
+                    if flow_key:
+                        timestamp = time.time()
+                        self._update_flow_stats(pkt_data, flow_key, timestamp)
+                
+                # Periodic cleanup and stats
+                current_time = time.time()
+                if current_time - getattr(self, '_last_cleanup', 0) > 10:
+                    self._cleanup_old_flows(current_time)
+                    self._last_cleanup = current_time
+                    self._print_stats()
+                
+                time.sleep(0.001)  # Small delay to prevent busy loop
+        
+        except Exception as e:
+            logger.error(f"DPDK mode failed: {e}, falling back to EVE JSON")
+            self._run_fallback_mode()
     
     def _cleanup_old_flows(self, current_time: float):
         """Remove flows that haven't seen packets in FLOW_TIMEOUT seconds"""
@@ -361,7 +409,7 @@ class DPDKFeatureEngine:
     
     def _print_stats(self):
         """Print processing statistics"""
-        logger.info(f"📊 Stats: {self.stats['packets']} packets, {len(self.flows)} active flows")
+        logger.info(f"📊 Stats: {self.stats['flows']} flows processed, {len(self.flows)} active flows")
 
 
 def main():
