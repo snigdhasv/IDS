@@ -7,6 +7,10 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/../config/pipeline.conf"
+AUTO_CONFIRM="${AUTO_CONFIRM:-0}"
+if [ "${DPDK_AUTO_BIND:-0}" = "1" ]; then
+    AUTO_CONFIRM=1
+fi
 
 # Colors
 RED='\033[0;31m'
@@ -99,10 +103,14 @@ echo -e "${YELLOW}The interface will be taken OFFLINE and unavailable for normal
 echo -e "${YELLOW}Network connectivity will be lost if this is your primary interface.${NC}"
 echo
 
-read -p "Continue? (type 'yes' to proceed): " -r
-if [[ ! $REPLY == "yes" ]]; then
-    echo "Aborted."
-    exit 0
+if [ $AUTO_CONFIRM -eq 0 ]; then
+    read -p "Continue? (type 'yes' to proceed): " -r
+    if [[ ! $REPLY == "yes" ]]; then
+        echo "Aborted."
+        exit 0
+    fi
+else
+    echo -e "${CYAN}Auto confirmation enabled; proceeding without prompt.${NC}"
 fi
 
 # Backup current configuration

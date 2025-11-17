@@ -140,6 +140,7 @@ stats:
 dpdk:
   eal-params:
     proc-type: primary
+    
   interfaces:
     - interface: ${INTERFACE_PCI_ADDRESS}
       threads: ${SURICATA_CORES}
@@ -147,6 +148,8 @@ dpdk:
       cluster-type: cluster_flow
       promisc: yes
       checksum-checks: yes
+      copy-mode: none
+      copy-iface: none
 
 outputs:
   - eve-log:
@@ -159,6 +162,7 @@ outputs:
         - dns
         - tls
         - stats
+        - packet
 
 default-rule-path: /etc/suricata/rules
 rule-files:

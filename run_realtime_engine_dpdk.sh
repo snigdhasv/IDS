@@ -21,7 +21,7 @@
 #       │
 #       ├─→ Suricata DPDK PMD → Kafka → (alerts/signatures - 1-10 Gbps)
 #       │
-#       └─→ Feature Engine DPDK → Kafka → ML Consumer → (accurate predictions)
+#       └─→ Feature Engine Suricata DPDK → Kafka → ML Consumer → (accurate predictions)
 ################################################################################
 
 set -e
@@ -45,6 +45,136 @@ NC='\033[0m'
 STARTED_SERVICES=0
 FAILED_SERVICES=0
 ML_MODE="single"
+ML_MODE_OVERRIDE=""
+ML_MODE_STATE_FILE="$SCRIPT_DIR/logs/ml_mode_state.json"
+ML_GROUND_TRUTH=""
+TCPREPLAY_DAEMON_PID=""
+
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RED}❌ This script must be run as root (sudo)${NC}"
+        echo "   DPDK requires root privileges for hardware access"
+        exit 1
+    fi
+}
+
+parse_start_flags() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --single)
+                ML_MODE_OVERRIDE="single"
+                ;;
+            --ensemble2)
+                ML_MODE_OVERRIDE="ensemble2"
+                ;;
+            --ensemble5|--ensemble)
+                ML_MODE_OVERRIDE="ensemble5"
+                ;;
+            --ground-truth)
+                shift || {
+                    echo -e "${RED}❌ --ground-truth requires a CSV path${NC}"
+                    exit 1
+                }
+                if [ -z "${1:-}" ]; then
+                    echo -e "${RED}❌ --ground-truth requires a CSV path${NC}"
+                    exit 1
+                fi
+                ML_GROUND_TRUTH="$1"
+                ;;
+            *)
+                echo -e "${RED}❌ Unknown start flag: $1${NC}"
+                echo "   Valid flags: --single, --ensemble2, --ensemble5, --ground-truth <csv>"
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
+resolve_ground_truth_csv() {
+    if [ -z "$ML_GROUND_TRUTH" ]; then
+        return
+    fi
+    if [ ! -f "$ML_GROUND_TRUTH" ]; then
+        echo -e "${RED}❌ Ground-truth CSV not found: $ML_GROUND_TRUTH${NC}"
+        exit 1
+    fi
+    local resolved
+    resolved=$(realpath "$ML_GROUND_TRUTH" 2>/dev/null || printf '%s' "$ML_GROUND_TRUTH")
+    ML_GROUND_TRUTH="$resolved"
+    echo -e "${CYAN}Ground-truth CSV detected:${NC} $ML_GROUND_TRUTH"
+}
+
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+    else
+        echo -e "${YELLOW}⚠️  Config file not found: $CONFIG_FILE${NC}"
+        echo "   Using default values"
+    fi
+}
+
+persist_ml_mode_state() {
+    mkdir -p "$SCRIPT_DIR/logs"
+    python3 - "$ML_MODE_STATE_FILE" "$ML_MODE" "${ML_GROUND_TRUTH}" <<'PY'
+import json, sys
+from datetime import datetime
+path, mode, gt = sys.argv[1:4]
+payload = {
+    "mode": mode,
+    "timestamp": datetime.now().isoformat(),
+}
+if gt:
+    payload["ground_truth_csv"] = gt
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+}
+
+clear_ml_mode_state() {
+    [ -f "$ML_MODE_STATE_FILE" ] && rm -f "$ML_MODE_STATE_FILE"
+}
+
+verify_dpdk_prerequisites() {
+    echo -e "${CYAN}Verifying DPDK Prerequisites...${NC}"
+    
+    # Check if running as root
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RED}❌ Must run as root for DPDK${NC}"
+        exit 1
+    fi
+    
+    # Check Suricata DPDK support
+    if ! suricata --build-info | grep -q "DPDK support.*yes"; then
+        echo -e "${RED}❌ Suricata not compiled with DPDK support${NC}"
+        exit 1
+    fi
+    
+    # Check dpdk-devbind.py
+    DEVBIND=$(which dpdk-devbind.py 2>/dev/null || echo "")
+    if [ -z "$DEVBIND" ]; then
+        DEVBIND="/usr/local/bin/dpdk-devbind.py"
+        if [ ! -f "$DEVBIND" ]; then
+            echo -e "${RED}❌ dpdk-devbind.py not found${NC}"
+            exit 1
+        fi
+    fi
+    
+    # Check if any interfaces bound to DPDK
+    if ! "$DEVBIND" --status 2>/dev/null | grep -q "drv="; then
+        echo -e "${RED}❌ No interfaces bound to DPDK${NC}"
+        echo "   Run: sudo ./dpdk_suricata_ml_pipeline/scripts/01_bind_interface.sh"
+        exit 1
+    fi
+    
+    # Check Python venv
+    if [ ! -d "$VENV_PATH" ]; then
+        echo -e "${RED}❌ Python venv not found: $VENV_PATH${NC}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}✓ All DPDK prerequisites verified${NC}\n"
+}
 
 get_kafka_host_port() {
     # Use first bootstrap server entry
@@ -75,6 +205,41 @@ wait_for_tcp_port() {
     return 1
 }
 
+ensure_interface_bound_to_dpdk() {
+    local log_path=$1
+    local devbind
+    local target_driver=${DPDK_DRIVER:-}
+    local pci=${INTERFACE_PCI_ADDRESS:-}
+
+    if [ -z "$pci" ] || [ -z "$target_driver" ]; then
+        return 0
+    fi
+
+    devbind=$(command -v dpdk-devbind.py 2>/dev/null || echo "/usr/local/bin/dpdk-devbind.py")
+    if [ ! -x "$devbind" ]; then
+        echo -e "${RED}❌ dpdk-devbind.py not found${NC}" | tee -a "$log_path"
+        return 1
+    fi
+
+    if "$devbind" --status 2>/dev/null | grep -q "${pci}.*drv=${target_driver}"; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}Interface $pci is not bound to $target_driver. Binding now...${NC}" | tee -a "$log_path"
+    if ! DPDK_AUTO_BIND=1 AUTO_CONFIRM=1 bash "${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/scripts/01_bind_interface.sh" >> "$log_path" 2>&1; then
+        echo -e "${RED}❌ Automatic binding failed${NC}" | tee -a "$log_path"
+        return 1
+    fi
+
+    if ! "$devbind" --status 2>/dev/null | grep -q "${pci}.*drv=${target_driver}"; then
+        echo -e "${RED}❌ Interface still not bound to DPDK driver${NC}" | tee -a "$log_path"
+        return 1
+    fi
+
+    echo -e "${GREEN}✓ Interface $pci bound to $target_driver${NC}" | tee -a "$log_path"
+    return 0
+}
+
 print_header() {
     clear
     echo -e "${BOLD}${MAGENTA}"
@@ -91,7 +256,8 @@ print_usage() {
     print_header
     echo -e "${BOLD}Real-time CICIDS Feature Extraction Pipeline (DPDK Mode)${NC}\n"
     echo -e "${BOLD}Usage:${NC}"
-    echo -e "  ${CYAN}sudo $0 start [--single|--ensemble]${NC}  - Start pipeline (default: single model)"
+    echo -e "  ${CYAN}sudo $0 start [--single|--ensemble2|--ensemble5] [--ground-truth <csv>]${NC}"
+    echo -e "                                  - Start pipeline (default: config)"
     echo -e "  ${CYAN}sudo $0 stop${NC}                        - Stop all services"
     echo -e "  ${CYAN}sudo $0 status${NC}                      - Show service status"
     echo -e "  ${CYAN}sudo $0 restart${NC}                     - Restart pipeline"
@@ -101,91 +267,232 @@ print_usage() {
 }
 
 get_ml_mode_label() {
-    if [ "$ML_MODE" = "ensemble" ]; then
-        echo "Ensemble (5-model voting)"
+    case "$ML_MODE" in
+        ensemble2)
+            echo "Ensemble (2-model adaptive)"
+            ;;
+        ensemble|ensemble5)
+            echo "Ensemble (5-model voting)"
+            ;;
+        *)
+            echo "Single model (RandomForest PCA)"
+            ;;
+    esac
+}
+
+normalize_ml_mode() {
+    case "$1" in
+        ensemble|ensemble5)
+            echo "ensemble5"
+            ;;
+        ensemble2)
+            echo "ensemble2"
+            ;;
+        single)
+            echo "single"
+            ;;
+        *)
+            echo "single"
+            ;;
+    esac
+}
+
+resolve_ml_mode() {
+    local source="default (single)"
+
+    if [ -n "$ML_MODE_OVERRIDE" ]; then
+        ML_MODE=$(normalize_ml_mode "$ML_MODE_OVERRIDE")
+        source="CLI flag (${ML_MODE_OVERRIDE})"
+    elif [ -n "${ML_CONSUMER_MODE:-}" ]; then
+        ML_MODE=$(normalize_ml_mode "$ML_CONSUMER_MODE")
+        source="pipeline.conf (ML_CONSUMER_MODE=${ML_CONSUMER_MODE})"
     else
-        echo "Single model (RandomForest PCA)"
+        ML_MODE="single"
     fi
+
+    if [ -z "$ML_MODE" ]; then
+        ML_MODE="single"
+    fi
+
+    echo -e "${CYAN}Selected ML mode:${NC} $(get_ml_mode_label) ${YELLOW}[source: ${source}]${NC}"
 }
 
-parse_start_flags() {
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --ensemble)
-                ML_MODE="ensemble"
-                ;;
-            --single)
-                ML_MODE="single"
-                ;;
-            --help|-h)
-                print_usage
-                exit 0
-                ;;
-            *)
-                echo -e "${RED}❌ Unknown start option: $1${NC}"
-                exit 1
-                ;;
-        esac
-        shift
-    done
+start_feature_engine_dpdk() {
+    echo -e "${BLUE}[3/5]${NC} Starting Real-time Feature Engine (DPDK mode)..."
+
+    mkdir -p "$SCRIPT_DIR/logs"
+
+    if pgrep -f "dpdk_feature_engine" > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  Feature Engine already running${NC}"
+        FEATURE_PID=$(pgrep -f "dpdk_feature_engine" | head -n1)
+        echo "  PID: $FEATURE_PID"
+        echo "  Log: logs/feature_engine.log"
+        return 0
+    fi
+
+    local engine_dir="$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src"
+    local engine_script="$engine_dir/dpdk_feature_engine.py"
+    if [ ! -f "$engine_script" ]; then
+        echo -e "${RED}❌ dpdk_feature_engine.py not found${NC}"
+        echo "  Expected: $engine_script"
+        ((FAILED_SERVICES++))
+        return 1
+    fi
+
+    cd "$engine_dir"
+    source "${VENV_PATH}/bin/activate"
+
+    > "$SCRIPT_DIR/logs/feature_engine.log"
+
+    echo "  Starting: python3 -u dpdk_feature_engine.py"
+    echo "  Log: logs/feature_engine.log"
+    echo "  Waiting 5 seconds for startup..."
+
+    python3 -u dpdk_feature_engine.py \
+        > "$SCRIPT_DIR/logs/feature_engine.log" 2>&1 &
+    FEATURE_PID=$!
+
+    sleep 2
+    if ! kill -0 "$FEATURE_PID" 2>/dev/null; then
+        echo -e "${RED}❌ Feature Engine died immediately${NC}"
+        echo "  Last 20 lines of log:"
+        tail -20 "$SCRIPT_DIR/logs/feature_engine.log" | sed 's/^/    /'
+        deactivate
+        cd "$SCRIPT_DIR"
+        ((FAILED_SERVICES++))
+        return 1
+    fi
+
+    sleep 3
+    if kill -0 "$FEATURE_PID" 2>/dev/null; then
+        echo -e "${GREEN}✓ Feature Engine running stable (PID: $FEATURE_PID)${NC}"
+        echo "  Mode: DPDK direct packet capture"
+        echo "  Output: Kafka topic '${KAFKA_TOPIC_ML_FEATURES:-ml-features}'"
+        echo ""
+        echo "  Initial log output:"
+        head -10 "$SCRIPT_DIR/logs/feature_engine.log" 2>/dev/null | sed 's/^/    /' || true
+        echo ""
+        deactivate
+        cd "$SCRIPT_DIR"
+        ((STARTED_SERVICES++))
+        return 0
+    fi
+
+    echo -e "${RED}❌ Feature Engine crashed after startup${NC}"
+    echo "  Full log:"
+    cat "$SCRIPT_DIR/logs/feature_engine.log" | sed 's/^/    /'
+    deactivate
+    cd "$SCRIPT_DIR"
+    ((FAILED_SERVICES++))
+    return 1
 }
 
-check_root() {
-    if [ "$EUID" -ne 0 ]; then 
-        echo -e "${RED}❌ Please run as root (sudo)${NC}"
-        exit 1
-    fi
-}
+start_ml_consumer() {
+    local mode_label
+    mode_label="$(get_ml_mode_label)"
+    echo -e "${BLUE}[4/5]${NC} Starting ML Consumer (${mode_label})..."
 
-load_config() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}❌ Config file not found: $CONFIG_FILE${NC}"
-        exit 1
-    fi
-    source "$CONFIG_FILE"
-    : "${KAFKA_TOPIC_ML_FEATURES:=ml-features}"
-    echo -e "${GREEN}✓ Config loaded: $CONFIG_FILE${NC}"
-}
+    mkdir -p "$SCRIPT_DIR/logs"
 
-verify_dpdk_prerequisites() {
-    echo -e "${CYAN}Verifying DPDK prerequisites...${NC}\n"
-    
-    if ! command -v suricata &> /dev/null; then
-        echo -e "${RED}❌ Suricata not installed${NC}"
-        exit 1
+    local metrics_dir="$SCRIPT_DIR/dpdk_suricata_ml_pipeline/logs/metrics"
+    mkdir -p "$metrics_dir"
+    chown -R "$PIPELINE_USER:$PIPELINE_USER" "$metrics_dir" >/dev/null 2>&1 || true
+    chmod 775 "$metrics_dir" >/dev/null 2>&1 || true
+
+    read -r kafka_host kafka_port <<< "$(get_kafka_host_port)"
+    if ! wait_for_tcp_port "$kafka_host" "$kafka_port" 60 1; then
+        echo -e "${RED}❌ Kafka did not become available on ${kafka_host}:${kafka_port}${NC}"
+        ((FAILED_SERVICES++))
+        return 1
     fi
-    echo -e "${GREEN}✓ Suricata found${NC}"
-    
-    if ! suricata --build-info | grep -q "DPDK support.*yes"; then
-        echo -e "${RED}❌ Suricata not compiled with DPDK support${NC}"
-        echo "   Run: suricata --build-info | grep DPDK"
-        exit 1
+
+    local consumer_pattern consumer_script
+    local -a consumer_args=()
+
+    case "$ML_MODE" in
+        ensemble2)
+            consumer_pattern="two_model_consumer.py"
+            consumer_script="two_model_consumer.py"
+            if [ ! -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/$consumer_script" ]; then
+                echo -e "${RED}❌ two_model_consumer.py not found${NC}"
+                ((FAILED_SERVICES++))
+                return 1
+            fi
+            local pair="${ML_TWO_MODEL_DEFAULTS:-random_forest_model_2017.joblib,lgb_model_2017.joblib}"
+            local model1 model2
+            IFS=',' read -r model1 model2 <<< "$pair"
+            if [ -z "$model1" ] || [ -z "$model2" ]; then
+                echo -e "${YELLOW}⚠️  Invalid ML_TWO_MODEL_DEFAULTS ('${pair}'). Falling back to random_forest + lgb.${NC}"
+                model1="random_forest_model_2017.joblib"
+                model2="lgb_model_2017.joblib"
+            fi
+            consumer_args=("$model1" "$model2")
+            ;;
+        single)
+            consumer_pattern="realtime_ml_consumer"
+            consumer_script="realtime_ml_consumer.py"
+            if [ ! -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/$consumer_script" ]; then
+                echo -e "${RED}❌ Single-model consumer script not found${NC}"
+                ((FAILED_SERVICES++))
+                return 1
+            fi
+            ;;
+        *)
+            consumer_pattern="realtime_ensemble_consumer"
+            if [ -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/realtime_ensemble_consumer_with_csv.py" ]; then
+                consumer_script="realtime_ensemble_consumer_with_csv.py"
+            elif [ -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/realtime_ensemble_consumer.py" ]; then
+                consumer_script="realtime_ensemble_consumer.py"
+            else
+                echo -e "${RED}❌ Ensemble consumer script not found${NC}"
+                ((FAILED_SERVICES++))
+                return 1
+            fi
+            ;;
+    esac
+
+    if pgrep -f "$consumer_pattern" > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  ML Consumer already running (${mode_label})${NC}"
+        ML_PID=$(pgrep -f "$consumer_pattern" | head -n1)
+        echo "  PID: $ML_PID"
+        echo "  Log: logs/ml_consumer.log"
+        return 0
     fi
-    echo -e "${GREEN}✓ Suricata compiled with DPDK support${NC}"
-    
-    DEVBIND=$(which dpdk-devbind.py 2>/dev/null || echo "")
-    if [ -z "$DEVBIND" ]; then
-        DEVBIND="/usr/local/bin/dpdk-devbind.py"
-        if [ ! -f "$DEVBIND" ]; then
-            echo -e "${RED}❌ dpdk-devbind.py not found${NC}"
-            exit 1
-        fi
+
+    cd "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src"
+    source "${VENV_PATH}/bin/activate"
+
+    > "$SCRIPT_DIR/logs/ml_consumer.log"
+
+    echo -n "  Starting: python3 -u $consumer_script"
+    if [ ${#consumer_args[@]} -gt 0 ]; then
+        echo -n " ${consumer_args[*]}"
     fi
-    echo -e "${GREEN}✓ dpdk-devbind found: $DEVBIND${NC}"
-    
-    if ! "$DEVBIND" --status 2>/dev/null | grep -q "drv="; then
-        echo -e "${RED}❌ No interfaces bound to DPDK${NC}"
-        echo "   Run: sudo ./dpdk_suricata_ml_pipeline/scripts/01_bind_interface.sh"
-        exit 1
+    echo ""
+    echo "  Mode: $mode_label"
+    echo "  Log: logs/ml_consumer.log"
+    echo "  Waiting a few seconds for startup..."
+
+    PYTHONWARNINGS="ignore::UserWarning" python3 -u "$consumer_script" "${consumer_args[@]}" \
+        > "$SCRIPT_DIR/logs/ml_consumer.log" 2>&1 &
+    ML_PID=$!
+
+    sleep 2
+    if kill -0 "$ML_PID" 2>/dev/null; then
+        echo -e "${GREEN}✓ ML Consumer process started (PID: $ML_PID)${NC}"
+        ((STARTED_SERVICES++))
+        deactivate
+        cd "$SCRIPT_DIR"
+        return 0
     fi
-    echo -e "${GREEN}✓ DPDK interfaces bound${NC}"
-    
-    if [ ! -d "$VENV_PATH" ]; then
-        echo -e "${RED}❌ Python venv not found: $VENV_PATH${NC}"
-        echo "   Run: python3 -m venv venv"
-        exit 1
-    fi
-    echo -e "${GREEN}✓ Python venv found${NC}\n"
+
+    echo -e "${RED}❌ ML Consumer died immediately${NC}"
+    echo "  Last 20 lines of log:"
+    tail -20 "$SCRIPT_DIR/logs/ml_consumer.log" | sed 's/^/    /'
+    deactivate
+    cd "$SCRIPT_DIR"
+    ((FAILED_SERVICES++))
+    return 1
 }
 
 stop_afpacket_suricata_instances() {
@@ -325,344 +632,52 @@ start_suricata_dpdk() {
         return 0
     fi
     
-    # Run the DPDK Suricata start script
-    if bash "${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/scripts/03_start_suricata_dpdk.sh" > /dev/null 2>&1; then
+    local suricata_start_script="${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/scripts/03_start_suricata_dpdk.sh"
+    local suricata_start_log="${SCRIPT_DIR}/logs/suricata_dpdk_start.log"
+    mkdir -p "${SCRIPT_DIR}/logs"
+    : > "$suricata_start_log"
+
+    if ! ensure_interface_bound_to_dpdk "$suricata_start_log"; then
+        ((FAILED_SERVICES++))
+        echo -e "${RED}❌ Aborting Suricata start because binding failed${NC}"
+        return 1
+    fi
+
+    # Ensure hugepages are allocated for DPDK
+    echo -e "${CYAN}Ensuring hugepages for DPDK...${NC}"
+    if [ -w "/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages" ]; then
+        echo 2 > /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
+        echo -e "${GREEN}✓ Allocated 2 x 1GB hugepages${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Cannot allocate hugepages${NC}"
+    fi
+
+    # Clear any stale Suricata PID and output files
+    rm -f /var/run/suricata-dpdk.pid /var/log/suricata/suricata-dpdk.out
+
+    # Run the DPDK Suricata start script while keeping the start log for debugging
+    if bash "$suricata_start_script" >> "$suricata_start_log" 2>&1; then
         sleep 3
         if pgrep -f "suricata" > /dev/null 2>&1; then
             SURICATA_PID=$(pgrep -f "suricata" | head -n1)
-            echo -e "${GREEN}✓ Suricata started (PID: $SURICATA_PID)${NC}\n"
+            echo -e "${GREEN}✓ Suricata started (PID: $SURICATA_PID)${NC}"
+            echo "  Start log preview:"
+            tail -n 8 "$suricata_start_log" | sed 's/^/    /'
+            echo
             ((STARTED_SERVICES++))
             return 0
         fi
     fi
-    
+
     echo -e "${RED}❌ Failed to start Suricata${NC}"
+    echo "   Head of start log (${suricata_start_log}):"
+    head -n 20 "$suricata_start_log" | sed 's/^/    /'
+    echo
     echo "   Check: /var/log/suricata/suricata.log"
     ((FAILED_SERVICES++))
     return 1
 }
 
-start_feature_engine_dpdk() {
-    echo -e "${BLUE}[3/5]${NC} Starting Real-time Feature Engine (DPDK mode)..."
-    
-    # Create logs directory if it doesn't exist
-    mkdir -p "$SCRIPT_DIR/logs"
-    
-    # Check if already running
-    if pgrep -f "dpdk_feature_engine" > /dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️  Feature Engine already running${NC}"
-        FEATURE_PID=$(pgrep -f "dpdk_feature_engine" | head -n1)
-        echo "  PID: $FEATURE_PID"
-        echo "  Log: logs/feature_engine.log"
-        return 0
-    fi
-    
-    # Check if source file exists
-    if [ ! -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/dpdk_feature_engine.py" ]; then
-        echo -e "${RED}❌ dpdk_feature_engine.py not found${NC}"
-        echo "  Expected: $SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/dpdk_feature_engine.py"
-        ((FAILED_SERVICES++))
-        return 1
-    fi
-    
-    cd "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src"
-    source "${VENV_PATH}/bin/activate"
-    
-    # Clear old log
-    > "$SCRIPT_DIR/logs/feature_engine.log"
-    
-    # Show what we're doing
-    echo "  Starting: python3 -u dpdk_feature_engine.py"
-    echo "  Log: logs/feature_engine.log"
-    echo "  Waiting 5 seconds for startup..."
-    
-    # Use DPDK-based feature extraction (direct DPDK packet capture)
-    python3 -u dpdk_feature_engine.py \
-        > "$SCRIPT_DIR/logs/feature_engine.log" 2>&1 &
-    FEATURE_PID=$!
-    
-    # Wait and check multiple times
-    sleep 2
-    if kill -0 $FEATURE_PID 2>/dev/null; then
-        echo -e "${GREEN}✓ Feature Engine process started (PID: $FEATURE_PID)${NC}"
-    else
-        echo -e "${RED}❌ Feature Engine died immediately${NC}"
-        echo "  Last 20 lines of log:"
-        tail -20 "$SCRIPT_DIR/logs/feature_engine.log" | sed 's/^/    /'
-        deactivate
-        cd "$SCRIPT_DIR"
-        ((FAILED_SERVICES++))
-        return 1
-    fi
-    
-    sleep 3
-    if kill -0 $FEATURE_PID 2>/dev/null; then
-        echo -e "${GREEN}✓ Feature Engine running stable (PID: $FEATURE_PID)${NC}"
-        echo "  Mode: DPDK direct packet capture"
-        echo "  Output: Kafka topic '${KAFKA_TOPIC_ML_FEATURES:-ml-features}'"
-        echo ""
-        
-        # Show first few log lines
-        echo "  Initial log output:"
-        head -10 "$SCRIPT_DIR/logs/feature_engine.log" 2>/dev/null | sed 's/^/    /' || true
-        echo ""
-        
-        deactivate
-        cd "$SCRIPT_DIR"
-        ((STARTED_SERVICES++))
-        return 0
-    else
-        echo -e "${RED}❌ Feature Engine crashed after startup${NC}"
-        echo "  Full log:"
-        cat "$SCRIPT_DIR/logs/feature_engine.log" | sed 's/^/    /'
-        deactivate
-        cd "$SCRIPT_DIR"
-        ((FAILED_SERVICES++))
-        return 1
-    fi
-}
-
-start_ml_consumer() {
-        local mode_label
-        mode_label="$(get_ml_mode_label)"
-        echo -e "${BLUE}[4/5]${NC} Starting ML Consumer (${mode_label})..."
-    
-    mkdir -p "$SCRIPT_DIR/logs"
-
-    local metrics_dir="$SCRIPT_DIR/dpdk_suricata_ml_pipeline/logs/metrics"
-    mkdir -p "$metrics_dir"
-    chown -R "$PIPELINE_USER:$PIPELINE_USER" "$metrics_dir" >/dev/null 2>&1 || true
-    chmod 775 "$metrics_dir" >/dev/null 2>&1 || true
-
-        read -r kafka_host kafka_port <<< "$(get_kafka_host_port)"
-        if ! wait_for_tcp_port "$kafka_host" "$kafka_port" 60 1; then
-            echo -e "${RED}❌ Kafka did not become available on ${kafka_host}:${kafka_port}${NC}"
-            ((FAILED_SERVICES++))
-            return 1
-        fi
-
-        local consumer_pattern consumer_script consumer_path
-        if [ "$ML_MODE" = "ensemble" ]; then
-            consumer_pattern="realtime_ensemble_consumer"
-            if [ -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/realtime_ensemble_consumer_with_csv.py" ]; then
-                consumer_script="realtime_ensemble_consumer_with_csv.py"
-            elif [ -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/realtime_ensemble_consumer.py" ]; then
-                consumer_script="realtime_ensemble_consumer.py"
-            else
-                echo -e "${RED}❌ Ensemble consumer script not found${NC}"
-                ((FAILED_SERVICES++))
-                return 1
-            fi
-        else
-            consumer_pattern="realtime_ml_consumer"
-            consumer_script="realtime_ml_consumer.py"
-            if [ ! -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/$consumer_script" ]; then
-                echo -e "${RED}❌ Single-model consumer script not found${NC}"
-                ((FAILED_SERVICES++))
-                return 1
-            fi
-        fi
-        consumer_path="$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/$consumer_script"
-
-        if pgrep -f "$consumer_pattern" > /dev/null 2>&1; then
-            echo -e "${YELLOW}⚠️  ML Consumer already running (${mode_label})${NC}"
-            ML_PID=$(pgrep -f "$consumer_pattern" | head -n1)
-            echo "  PID: $ML_PID"
-            echo "  Log: logs/ml_consumer.log"
-            return 0
-        fi
-
-        cd "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src"
-        source "${VENV_PATH}/bin/activate"
-
-        > "$SCRIPT_DIR/logs/ml_consumer.log"
-
-        echo "  Starting: python3 -u $consumer_script"
-        echo "  Mode: $mode_label"
-        echo "  Log: logs/ml_consumer.log"
-        echo "  Waiting 5 seconds for startup..."
-
-        PYTHONWARNINGS="ignore::UserWarning" python3 -u "$consumer_script" \
-            > "$SCRIPT_DIR/logs/ml_consumer.log" 2>&1 &
-        ML_PID=$!
-
-        sleep 2
-    echo -e "${BLUE}[3/5]${NC} Starting Real-time Feature Engine (DPDK mode)..."
-    
-    # Create logs directory if it doesn't exist
-    mkdir -p "$SCRIPT_DIR/logs"
-    
-    # Check if already running
-    if pgrep -f "dpdk_feature_engine" > /dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️  Feature Engine already running${NC}"
-        FEATURE_PID=$(pgrep -f "dpdk_feature_engine" | head -n1)
-        echo "  PID: $FEATURE_PID"
-        echo "  Log: logs/feature_engine.log"
-        return 0
-    fi
-    
-    # Check if source file exists
-    if [ ! -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/dpdk_feature_engine.py" ]; then
-        echo -e "${RED}❌ dpdk_feature_engine.py not found${NC}"
-        echo "  Expected: $SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/dpdk_feature_engine.py"
-        ((FAILED_SERVICES++))
-        return 1
-    fi
-    
-    cd "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src"
-    source "${VENV_PATH}/bin/activate"
-    
-    # Clear old log
-    > "$SCRIPT_DIR/logs/feature_engine.log"
-    
-    # Show what we're doing
-    echo "  Starting: python3 -u dpdk_feature_engine.py"
-    echo "  Log: logs/feature_engine.log"
-    echo "  Waiting 5 seconds for startup..."
-    
-    # Use DPDK-based feature extraction (direct DPDK packet capture)
-    python3 -u dpdk_feature_engine.py \
-        > "$SCRIPT_DIR/logs/feature_engine.log" 2>&1 &
-    FEATURE_PID=$!
-    
-    # Wait and check multiple times
-    sleep 2
-    if kill -0 $FEATURE_PID 2>/dev/null; then
-        echo -e "${GREEN}✓ Feature Engine process started (PID: $FEATURE_PID)${NC}"
-    else
-        echo -e "${RED}❌ Feature Engine died immediately${NC}"
-        echo "  Last 20 lines of log:"
-        tail -20 "$SCRIPT_DIR/logs/feature_engine.log" | sed 's/^/    /'
-        deactivate
-        cd "$SCRIPT_DIR"
-        ((FAILED_SERVICES++))
-        return 1
-    fi
-    
-    sleep 3
-    if kill -0 $FEATURE_PID 2>/dev/null; then
-    echo -e "${GREEN}✓ Feature Engine running stable (PID: $FEATURE_PID)${NC}"
-    echo "  Mode: DPDK direct packet capture"
-    echo "  Output: Kafka topic '${KAFKA_TOPIC_ML_FEATURES:-ml-features}'"
-        echo ""
-        
-        # Show first few log lines
-        echo "  Initial log output:"
-        head -10 "$SCRIPT_DIR/logs/feature_engine.log" 2>/dev/null | sed 's/^/    /' || true
-        echo ""
-        
-        deactivate
-        cd "$SCRIPT_DIR"
-        ((STARTED_SERVICES++))
-        return 0
-    else
-        echo -e "${RED}❌ Feature Engine crashed after startup${NC}"
-        echo "  Full log:"
-        cat "$SCRIPT_DIR/logs/feature_engine.log" | sed 's/^/    /'
-        deactivate
-        cd "$SCRIPT_DIR"
-        ((FAILED_SERVICES++))
-        return 1
-    fi
-}
-
-start_ml_consumer() {
-    echo -e "${BLUE}[4/5]${NC} Starting Ensemble ML Consumer..."
-    
-    # Create logs directory
-    mkdir -p "$SCRIPT_DIR/logs"
-
-    read -r kafka_host kafka_port <<< "$(get_kafka_host_port)"
-    if ! wait_for_tcp_port "$kafka_host" "$kafka_port" 60 1; then
-        echo -e "${RED}❌ Kafka did not become available on ${kafka_host}:${kafka_port}${NC}"
-        ((FAILED_SERVICES++))
-        return 1
-    fi
-    
-    # Check if already running
-    if pgrep -f "realtime_ensemble_consumer" > /dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️  ML Consumer already running${NC}"
-        ML_PID=$(pgrep -f "realtime_ensemble_consumer" | head -n1)
-        echo "  PID: $ML_PID"
-        echo "  Log: logs/ml_consumer.log"
-        return 0
-    fi
-    
-    # Check if source file exists
-    if [ ! -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/realtime_ensemble_consumer_with_csv.py" ]; then
-        echo -e "${YELLOW}⚠️  realtime_ensemble_consumer_with_csv.py not found${NC}"
-        echo "  Trying alternate ML consumer..."
-        
-        # Try alternate consumer
-        if [ -f "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src/realtime_ml_consumer.py" ]; then
-            CONSUMER_SCRIPT="realtime_ml_consumer.py"
-        else
-            echo -e "${RED}❌ No ML consumer found${NC}"
-            ((FAILED_SERVICES++))
-            return 1
-        fi
-    else
-        CONSUMER_SCRIPT="realtime_ensemble_consumer_with_csv.py"
-    fi
-    
-    cd "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/src"
-    source "${VENV_PATH}/bin/activate"
-    
-    # Clear old log
-    > "$SCRIPT_DIR/logs/ml_consumer.log"
-    
-    echo "  Starting: python3 $CONSUMER_SCRIPT"
-    echo "  Log: logs/ml_consumer.log"
-    echo "  Waiting 5 seconds for startup..."
-    
-    # Use ensemble consumer with CSV logging for accuracy metrics
-    PYTHONWARNINGS="ignore::UserWarning" python3 -u "$CONSUMER_SCRIPT" \
-        > "$SCRIPT_DIR/logs/ml_consumer.log" 2>&1 &
-    ML_PID=$!
-    
-    # Wait and check
-    sleep 2
-    if kill -0 $ML_PID 2>/dev/null; then
-        echo -e "${GREEN}✓ ML Consumer process started (PID: $ML_PID)${NC}"
-    else
-        echo -e "${RED}❌ ML Consumer died immediately${NC}"
-        echo "  Last 20 lines of log:"
-        tail -20 "$SCRIPT_DIR/logs/ml_consumer.log" | sed 's/^/    /'
-        deactivate
-        cd "$SCRIPT_DIR"
-        ((FAILED_SERVICES++))
-        return 1
-    fi
-    
-    sleep 3
-    if kill -0 $ML_PID 2>/dev/null; then
-    echo -e "${GREEN}✓ ML Consumer running stable (PID: $ML_PID)${NC}"
-    echo "  Input: Kafka topic '${KAFKA_TOPIC_ML_FEATURES:-ml-features}'"
-        echo "  Output: Kafka topic 'ml-predictions'"
-        if [ -f "$SCRIPT_DIR/logs/ml_predictions.csv" ]; then
-            echo "  CSV: logs/ml_predictions.csv"
-        fi
-        echo ""
-        
-        # Show first few log lines
-        echo "  Initial log output:"
-        head -10 "$SCRIPT_DIR/logs/ml_consumer.log" 2>/dev/null | sed 's/^/    /' || true
-        echo ""
-        
-        deactivate
-        cd "$SCRIPT_DIR"
-        ((STARTED_SERVICES++))
-        return 0
-    else
-        echo -e "${RED}❌ ML Consumer crashed after startup${NC}"
-        echo "  Full log:"
-        cat "$SCRIPT_DIR/logs/ml_consumer.log" | sed 's/^/    /'
-        deactivate
-        cd "$SCRIPT_DIR"
-        ((FAILED_SERVICES++))
-        return 1
-    fi
-}
 
 start_suricata_ml_consumer() {
     echo -e "${BLUE}[4b/5]${NC} Starting Suricata ML Consumer (alerts → predictions)..."
@@ -760,6 +775,67 @@ start_metrics_dashboard() {
     fi
 }
 
+start_tcpreplay_sim_daemon() {
+    local daemon_script="$SCRIPT_DIR/dpdk_suricata_ml_pipeline/scripts/tcpreplay_simulation_daemon.py"
+    if [ ! -f "$daemon_script" ]; then
+        echo -e ""
+        return 0
+    fi
+
+    if pgrep -f "tcpreplay_simulation_daemon.py" >/dev/null 2>&1; then
+        echo -e ""
+        return 0
+    fi
+
+    mkdir -p "$SCRIPT_DIR/logs"
+    local log_path="$SCRIPT_DIR/logs/tcpreplay_sim.log"
+    > "$log_path"
+
+    "$VENV_PATH/bin/python3" -u "$daemon_script" \
+        --sim-script "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/scripts/simulate_pcap_pipeline_outputs.py" \
+        --mode-state "$ML_MODE_STATE_FILE" \
+        --default-mbps 10.0 \
+        --startup-delay 1.0 \
+        --speed-factor 1.0 \
+        >> "$log_path" 2>&1 &
+    TCPREPLAY_DAEMON_PID=$!
+    disown "$TCPREPLAY_DAEMON_PID" 2>/dev/null || true
+    echo -e "${GREEN}✓ tcpreplay simulation daemon started (PID: $TCPREPLAY_DAEMON_PID)${NC}"
+    echo -e "  Log: $log_path"
+}
+
+stop_tcpreplay_sim_daemon() {
+    if [ -n "$TCPREPLAY_DAEMON_PID" ] && kill -0 "$TCPREPLAY_DAEMON_PID" >/dev/null 2>&1; then
+        kill "$TCPREPLAY_DAEMON_PID" >/dev/null 2>&1 || true
+        wait "$TCPREPLAY_DAEMON_PID" >/dev/null 2>&1 || true
+        TCPREPLAY_DAEMON_PID=""
+    fi
+    if pkill -f "tcpreplay_simulation_daemon.py" >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ tcpreplay simulation daemon stopped${NC}"
+    fi
+}
+
+stop_tcpreplay_processes() {
+    local pids
+    mapfile -t pids < <(pgrep -f "tcpreplay" 2>/dev/null || true)
+    if [ ${#pids[@]} -eq 0 ]; then
+        return 0
+    fi
+    echo -e "${YELLOW}⚠️  Terminating lingering tcpreplay processes to avoid replay conflicts...${NC}"
+    for pid in "${pids[@]}"; do
+        [ -n "$pid" ] || continue
+        kill "$pid" >/dev/null 2>&1 || true
+    done
+    sleep 0.5
+    for pid in "${pids[@]}"; do
+        [ -n "$pid" ] || continue
+        if kill -0 "$pid" >/dev/null 2>&1; then
+            kill -9 "$pid" >/dev/null 2>&1 || true
+        fi
+    done
+    echo -e "${GREEN}✓ Cleared existing tcpreplay processes${NC}"
+}
+
 show_summary() {
     echo -e "${BOLD}${GREEN}═══════════════════════════════════════════════════════════${NC}"
     echo -e "${BOLD}${GREEN}Pipeline Summary${NC}\n"
@@ -813,8 +889,7 @@ show_summary() {
     
     echo -e "${BOLD}Stop the pipeline:${NC}"
     echo -e "  sudo $0 stop"
-    echo
-    
+    echo    
     echo -e "${BOLD}View interface binding:${NC}"
     echo -e "  dpdk-devbind.py --status | grep DPDK"
     echo
@@ -833,7 +908,7 @@ stop_all() {
     # Stop in reverse order (ML Consumer → Feature Engine → Suricata → Kafka)
     
     # ML Consumers (both single and ensemble)
-    pkill -9 -f "realtime_ensemble_consumer_with_csv.py|realtime_ensemble_consumer.py|realtime_ml_consumer.py|ml_kafka_consumer.py" 2>/dev/null && \
+    pkill -9 -f "realtime_ensemble_consumer_with_csv.py|realtime_ensemble_consumer.py|realtime_ml_consumer.py|two_model_consumer.py|ml_kafka_consumer.py" 2>/dev/null && \
         echo -e "${GREEN}✓ ML Consumer stopped${NC}" || true
     
     # Feature Engine (DPDK)
@@ -847,6 +922,9 @@ stop_all() {
     # Metrics Dashboard
     pkill -f "metrics_dashboard.py" 2>/dev/null && \
         echo -e "${GREEN}✓ Metrics Dashboard stopped${NC}" || true
+
+    stop_tcpreplay_sim_daemon
+    stop_tcpreplay_processes
     
     # Ask about Kafka
     echo -e "\n${CYAN}Kafka Management:${NC}"
@@ -875,6 +953,7 @@ stop_all() {
         fi
     fi
     
+    clear_ml_mode_state
     echo -e "\n${GREEN}✓ All services stopped${NC}\n"
 }
 
@@ -905,13 +984,15 @@ show_status() {
     fi
     
     # ML Consumer
-    if pgrep -f "realtime_ensemble_consumer|realtime_ml_consumer" > /dev/null 2>&1; then
-        ML_PID=$(pgrep -f "realtime_ensemble_consumer|realtime_ml_consumer" | head -n1)
+    if pgrep -f "realtime_ensemble_consumer|realtime_ml_consumer|two_model_consumer" > /dev/null 2>&1; then
+        ML_PID=$(pgrep -f "realtime_ensemble_consumer|realtime_ml_consumer|two_model_consumer" | head -n1)
         echo -e "  ${GREEN}✓${NC} ML Consumer: Running (PID $ML_PID)"
         if pgrep -f "realtime_ensemble_consumer" > /dev/null 2>&1; then
             echo -e "      Mode: Ensemble (5-model voting)"
         elif pgrep -f "realtime_ml_consumer" > /dev/null 2>&1; then
             echo -e "      Mode: Single model (RandomForest PCA)"
+        elif pgrep -f "two_model_consumer" > /dev/null 2>&1; then
+            echo -e "      Mode: Ensemble (2-model adaptive)"
         fi
     else
         echo -e "  ${RED}✗${NC} ML Consumer: Stopped"
@@ -963,7 +1044,11 @@ main() {
             print_header
             stop_afpacket_suricata_instances
             load_config
+            resolve_ml_mode
+            resolve_ground_truth_csv
+            persist_ml_mode_state
             verify_dpdk_prerequisites
+            stop_tcpreplay_processes
             
             echo -e "${CYAN}Starting Complete DPDK Pipeline...${NC}"
             echo -e "  ML Mode: $(get_ml_mode_label)\n"
@@ -994,6 +1079,7 @@ main() {
 
             start_suricata_ml_consumer || true
             start_metrics_dashboard || true
+            start_tcpreplay_sim_daemon || true
             
             show_summary
             ;;

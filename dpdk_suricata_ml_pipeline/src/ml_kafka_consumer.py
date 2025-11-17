@@ -34,8 +34,12 @@ from model_loader import MLModelLoader
 from alert_processor import AlertProcessor
 
 # Configure logging - create log directory if it doesn't exist
-LOG_DIR = Path(__file__).parent.parent / 'logs' / 'ml'
+PIPELINE_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+LOG_DIR = PIPELINE_ROOT / 'logs' / 'ml'
+ROOT_ML_DIR = PROJECT_ROOT / 'logs' / 'ml'
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+ROOT_ML_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / 'ml_consumer.log'
 PREDICTIONS_LOG_FILE = LOG_DIR / 'all_predictions.log'
 
@@ -671,7 +675,8 @@ class MLEnhancedKafkaConsumer:
     def save_metrics_to_file(self):
         """Save performance metrics to JSON file for later analysis."""
         try:
-            metrics_file = LOG_DIR / f'performance_metrics_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+            filename = f'performance_metrics_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+            targets = [LOG_DIR / filename, ROOT_ML_DIR / filename]
             
             # Calculate summary metrics
             runtime = time.time() - self.stats['start_time'] if self.stats['start_time'] else 0
@@ -713,12 +718,14 @@ class MLEnhancedKafkaConsumer:
                 'errors': self.stats['errors']
             }
             
-            # Save to file
-            with open(metrics_file, 'w') as f:
-                json.dump(metrics_summary, f, indent=2)
-            
-            print(f"{Colors.GREEN}✓ Performance metrics saved to: {metrics_file}{Colors.END}")
-            logger.info(f"Performance metrics saved to {metrics_file}")
+            # Save to both pipeline and root mirrors
+            for target in targets:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, 'w') as f:
+                    json.dump(metrics_summary, f, indent=2)
+                logger.info(f"Performance metrics saved to {target}")
+            print(f"{Colors.GREEN}✓ Performance metrics saved to: {targets[0]}{Colors.END}")
+            print(f"{Colors.GREEN}  ↳ mirrored at: {targets[1]}{Colors.END}")
             
         except Exception as e:
             logger.error(f"Error saving metrics to file: {e}", exc_info=True)
