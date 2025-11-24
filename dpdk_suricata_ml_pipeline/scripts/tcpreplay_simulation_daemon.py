@@ -54,6 +54,21 @@ def parse_args() -> argparse.Namespace:
         default=2000,
         help="Limit simulator parsing to N flows for faster startup",
     )
+    parser.add_argument(
+        "--live-only",
+        action="store_true",
+        help="Run the simulator in eve-live-only mode instead of per-PCAP runs",
+    )
+    parser.add_argument(
+        "--eve-json-path",
+        help="Path to Suricata eve.json for live-only streaming",
+    )
+    parser.add_argument(
+        "--eve-poll-interval",
+        type=float,
+        default=0.5,
+        help="Poll interval to use when tailing eve.json in live-only mode",
+    )
     return parser.parse_args()
 
 
@@ -77,6 +92,9 @@ class SimulationConfig:
     loop_padding: float
     silence_sim_output: bool
     max_flows: int
+    live_only: bool
+    eve_json_path: Optional[Path]
+    eve_poll_interval: float
 
 
 def iter_tcpreplay_processes() -> Dict[int, TcpreplayContext]:
@@ -198,8 +216,6 @@ def launch_simulator(
     cmd = [
         sys.executable,
         str(cfg.sim_script),
-        "--pcap",
-        str(pcap_path),
         "--mode",
         mode,
         "--accuracy",
@@ -210,15 +226,28 @@ def launch_simulator(
         "--startup-delay",
         f"{cfg.startup_delay:.3f}",
     ]
-    if timeline_hint:
-        cmd += ["--timeline-seconds", f"{timeline_hint:.3f}"]
-    if gt_csv:
-        cmd += ["--ground-truth-csv", str(gt_csv)]
+    if cfg.live_only and cfg.eve_json_path is not None:
+        cmd += [
+            "--eve-json",
+            str(cfg.eve_json_path),
+            "--eve-live-only",
+            "--eve-poll-interval",
+            f"{cfg.eve_poll_interval:.3f}",
+        ]
+    else:
+        cmd += ["--pcap", str(pcap_path)]
+        if timeline_hint:
+            cmd += ["--timeline-seconds", f"{timeline_hint:.3f}"]
+        if gt_csv:
+            cmd += ["--ground-truth-csv", str(gt_csv)]
     if cfg.max_flows > 0:
         cmd += ["--max-flows", str(cfg.max_flows)]
 
+    target_desc = (
+        f"live-eve:{cfg.eve_json_path}" if cfg.live_only and cfg.eve_json_path else pcap_path.name
+    )
     log(
-        f"Launching simulator for {pcap_path.name} (tcpreplay pid={tcpreplay_ctx.pid}, mode={mode}, timeline={timeline_hint or 'auto'})"
+        f"Launching simulator for {target_desc} (tcpreplay pid={tcpreplay_ctx.pid}, mode={mode}, timeline={timeline_hint or 'auto'})"
     )
 
     stdout_pipe = subprocess.PIPE if not cfg.silence_sim_output else subprocess.DEVNULL
@@ -304,6 +333,15 @@ def main() -> int:
         log(f"Mode state file not found: {mode_state}")
         return 1
 
+    eve_json_path: Optional[Path] = None
+    if args.eve_json_path:
+        eve_json_path = Path(args.eve_json_path).expanduser().resolve()
+    if args.live_only and eve_json_path is None:
+        log("Live-only mode requested but --eve-json-path was not provided; refusing to start.")
+        return 1
+    if args.live_only and eve_json_path and not eve_json_path.exists():
+        log(f"Warning: eve.json not found at {eve_json_path}; simulator will wait for it at runtime.")
+
     cfg = SimulationConfig(
         sim_script=sim_script,
         mode_state=mode_state,
@@ -316,6 +354,9 @@ def main() -> int:
         loop_padding=args.loop_padding,
         silence_sim_output=args.silence_sim_output,
         max_flows=args.max_flows,
+        live_only=args.live_only,
+        eve_json_path=eve_json_path,
+        eve_poll_interval=args.eve_poll_interval,
     )
 
     signal.signal(signal.SIGINT, handle_signal)

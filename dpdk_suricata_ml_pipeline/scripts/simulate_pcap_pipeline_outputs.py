@@ -254,6 +254,26 @@ def _normalize_stats(
 PREDICTION_CSV_TEMPLATE = "predictions_{mode}_{stamp}.csv"
 PERFORMANCE_METRICS_TEMPLATE = "performance_metrics_{stamp}.json"
 
+PREDICTION_FIELDS_WITH_GT = [
+    "timestamp",
+    "flow_id",
+    "src_ip",
+    "dst_ip",
+    "src_port",
+    "dst_port",
+    "protocol",
+    "ground_truth",
+    "prediction",
+    "confidence",
+    "models_voted",
+    "agreement_percent",
+    "latency_ms",
+    "packets",
+    "bytes",
+    "correct",
+]
+PREDICTION_FIELDS_NO_GT = [name for name in PREDICTION_FIELDS_WITH_GT if name != "ground_truth"]
+
 CANONICAL_LABELS = [
     "BENIGN",
     "DDoS",
@@ -611,9 +631,9 @@ class FlowRecord:
     sim_offset: float = 0.0
     sim_timestamp: float = 0.0
 
-    def as_prediction_row(self) -> Dict[str, str]:
+    def as_prediction_row(self, include_ground_truth: bool = True) -> Dict[str, str]:
         ts_value = self.sim_timestamp or time.time()
-        return {
+        row = {
             "timestamp": datetime.fromtimestamp(ts_value).isoformat(),
             "flow_id": self.flow_id,
             "src_ip": self.src_ip,
@@ -621,7 +641,6 @@ class FlowRecord:
             "src_port": str(self.src_port),
             "dst_port": str(self.dst_port),
             "protocol": self.protocol,
-            "ground_truth": self.ground_truth,
             "prediction": self.predicted_label,
             "confidence": f"{self.confidence:.4f}",
             "models_voted": str(self.models_voted),
@@ -631,6 +650,9 @@ class FlowRecord:
             "bytes": str(self.bytes_total),
             "correct": str(self.correct),
         }
+        if include_ground_truth:
+            row["ground_truth"] = self.ground_truth
+        return row
 
 
 @dataclass
@@ -810,6 +832,18 @@ def _sample_profile_attack(flow: FlowRecord, profile: DayProfile, rng: random.Ra
             return label
         upto += weight
     return options[-1][0]
+
+
+def _derive_live_prediction_label(
+    flow: FlowRecord,
+    profile: Optional[DayProfile],
+    rng: random.Random,
+) -> str:
+    active_profile = profile or DEFAULT_PROFILE
+    benign_prob = max(min(active_profile.benign_weight, 0.995), 0.5)
+    if rng.random() <= benign_prob or not active_profile.attacks:
+        return "BENIGN"
+    return _sample_profile_attack(flow, active_profile, rng)
 
 
 # ---------------------------------------------------------------------------
@@ -1090,6 +1124,8 @@ def simulate_predictions(
     latency_sigma: float = 0.35,
     latency_tail_chance: float = 0.02,
     latency_tail_max_us: float = 2500.0,
+    live_only_mode: bool = False,
+    profile: Optional[DayProfile] = None,
 ) -> None:
     meta = MODE_METADATA[mode]
     ensemble_size = meta["ensemble_size"]
@@ -1104,6 +1140,9 @@ def simulate_predictions(
     accuracy = min(max(accuracy, 0.5), 0.999)
     num_incorrect = max(0, int(round((1 - accuracy) * total)))
     incorrect_indices = set(rng.sample(range(total), num_incorrect)) if num_incorrect else set()
+    if live_only_mode:
+        # Maintain variation in confidence/latency but ignore correctness semantics downstream.
+        pass
 
     # Just assign basic metadata - no timeline calculations
     for idx, flow in enumerate(flows):
@@ -1111,7 +1150,14 @@ def simulate_predictions(
         flow.models_voted = ensemble_size
         correct = idx not in incorrect_indices
         flow.correct = correct
-        pred = flow.ground_truth if correct else _misclassified_label(flow, rng)
+        if live_only_mode:
+            pred = _derive_live_prediction_label(flow, profile, rng)
+            if not correct:
+                pred = _sample_attack_label(rng, exclude={pred})
+            flow.coarse_label = "BENIGN" if pred.upper() in BENIGN_KEYWORDS else "ATTACK"
+            flow.ground_truth = ""
+        else:
+            pred = flow.ground_truth if correct else _misclassified_label(flow, rng)
         flow.predicted_label = pred
         lo, hi = bands["correct" if correct else "incorrect"]
         flow.confidence = rng.uniform(lo, hi)
@@ -1207,6 +1253,7 @@ def stream_artifacts(
     burst_max_flows: int = 28,
     burst_gap_us: float = 120.0,
     burst_gap_jitter_us: float = 80.0,
+    include_ground_truth_column: bool = True,
     tcpreplay_gate: Optional["TcpreplayGate"] = None,
 ) -> Tuple[List[Path], List[Path], Path]:
     sorted_flows = sorted(flows, key=lambda r: r.sim_offset)
@@ -1215,7 +1262,10 @@ def stream_artifacts(
     throughput_paths = [metrics_dir / f"throughput_{date_tag}.csv" for metrics_dir in METRICS_DIRS]
     
     # Create/get predictions CSV path upfront (realtime append mode)
-    csv_path = write_predictions_csv(mode, flows)
+    csv_path = write_predictions_csv(mode, include_ground_truth_column)
+    csv_fieldnames = (
+        PREDICTION_FIELDS_WITH_GT if include_ground_truth_column else PREDICTION_FIELDS_NO_GT
+    )
     
     if not sorted_flows:
         return jsonl_paths, throughput_paths, csv_path
@@ -1245,27 +1295,7 @@ def stream_artifacts(
         # Open CSV file in append mode for realtime writing
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         csv_file = stack.enter_context(csv_path.open("a", newline=""))
-        csv_writer = csv.DictWriter(
-            csv_file,
-            fieldnames=[
-                "timestamp",
-                "flow_id",
-                "src_ip",
-                "dst_ip",
-                "src_port",
-                "dst_port",
-                "protocol",
-                "ground_truth",
-                "prediction",
-                "confidence",
-                "models_voted",
-                "agreement_percent",
-                "latency_ms",
-                "packets",
-                "bytes",
-                "correct",
-            ],
-        )
+        csv_writer = csv.DictWriter(csv_file, fieldnames=csv_fieldnames)
         bucket_start_ts = start_wall
         bucket_events = 0
         bucket_bytes = 0
@@ -1408,7 +1438,7 @@ def stream_artifacts(
                     mf.flush()
                 
                 # Write flow to CSV in realtime
-                csv_writer.writerow(flow.as_prediction_row())
+                csv_writer.writerow(flow.as_prediction_row(include_ground_truth_column))
                 csv_file.flush()
 
                 should_flush = (bucket_last_ts - bucket_start_ts) >= bucket_target_seconds
@@ -1465,35 +1495,16 @@ def stream_artifacts(
     return jsonl_paths, throughput_paths, csv_path
 
 
-def write_predictions_csv(mode: str, flows: List[FlowRecord]) -> Path:
-    """Create or get existing predictions CSV path (for realtime append mode)."""
+def write_predictions_csv(mode: str, include_ground_truth: bool) -> Path:
+    """Create predictions CSV with the proper header for realtime append mode."""
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = PIPELINE_LOG_DIR / PREDICTION_CSV_TEMPLATE.format(mode=mode, stamp=stamp)
     
     # Create file with header if it doesn't exist
     if not csv_path.exists():
         with csv_path.open("w", newline="") as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=[
-                    "timestamp",
-                    "flow_id",
-                    "src_ip",
-                    "dst_ip",
-                    "src_port",
-                    "dst_port",
-                    "protocol",
-                    "ground_truth",
-                    "prediction",
-                    "confidence",
-                    "models_voted",
-                    "agreement_percent",
-                    "latency_ms",
-                    "packets",
-                    "bytes",
-                    "correct",
-                ],
-            )
+            fieldnames = PREDICTION_FIELDS_WITH_GT if include_ground_truth else PREDICTION_FIELDS_NO_GT
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
     return csv_path
 
@@ -1672,9 +1683,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     rng = random.Random(args.seed or int(time.time()))
-    
+    live_only_mode = bool(args.eve_live_only and args.eve_json)
+    include_ground_truth_column = not live_only_mode
+    gt_map: Dict[str, str] = {}
+    profile: DayProfile = DEFAULT_PROFILE
+    keyword_hints: List[str] = []
+
     # LIVE-ONLY MODE: Tail eve.json for flows after tcpreplay starts
-    if args.eve_live_only and args.eve_json:
+    if live_only_mode:
         eve_path = Path(args.eve_json).expanduser().resolve()
         if not eve_path.exists():
             parser.error(f"eve.json not found: {eve_path}")
@@ -1693,9 +1709,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         
         # Infer profile from eve.json filename
         profile, keyword_hints = infer_profile_from_pcap(eve_path)
-        
-        # Load ground truth if provided
-        gt_map = load_ground_truth(Path(args.ground_truth_csv).expanduser()) if args.ground_truth_csv else {}
         
         # Process live flows from eve.json
         flows_live: List[FlowRecord] = []
@@ -1854,15 +1867,16 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         )
         print("   detected tcpreplay ✅")
 
-    use_ground_truth = bool(gt_map)
-    assign_ground_truth(
-        flows,
-        gt_map,
-        profile,
-        rng,
-        use_ground_truth=use_ground_truth,
-        keyword_hints=keyword_hints,
-    )
+    if not live_only_mode:
+        use_ground_truth = bool(gt_map)
+        assign_ground_truth(
+            flows,
+            gt_map,
+            profile,
+            rng,
+            use_ground_truth=use_ground_truth,
+            keyword_hints=keyword_hints,
+        )
     simulate_predictions(
         flows,
         mode=args.mode,
@@ -1875,9 +1889,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         latency_sigma=args.latency_sigma,
         latency_tail_chance=args.latency_tail_chance,
         latency_tail_max_us=args.latency_tail_max_us,
+        live_only_mode=live_only_mode,
+        profile=profile,
     )
 
-    if args.ground_truth_csv:
+    if (not live_only_mode) and args.ground_truth_csv:
         gt_source = f"CSV:{Path(args.ground_truth_csv).expanduser().name}"
     else:
         gt_source = None
@@ -1897,6 +1913,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         burst_max_flows=args.burst_max,
         burst_gap_us=args.burst_gap_us,
         burst_gap_jitter_us=args.burst_gap_jitter_us,
+        include_ground_truth_column=include_ground_truth_column,
         tcpreplay_gate=tcpreplay_gate,
     )
     perf_paths = write_performance_metrics(args.mode, flows, stats)

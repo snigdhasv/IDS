@@ -791,12 +791,21 @@ start_tcpreplay_sim_daemon() {
     local log_path="$SCRIPT_DIR/logs/tcpreplay_sim.log"
     > "$log_path"
 
+    local eve_log_dir="${SURICATA_LOG_DIR:-/var/log/suricata}"
+    local eve_json_path="${eve_log_dir%/}/eve.json"
+    if [ ! -f "$eve_json_path" ]; then
+        echo -e "${YELLOW}⚠️  eve.json not found yet at $eve_json_path (will watch once Suricata starts)${NC}"
+    fi
+
     "$VENV_PATH/bin/python3" -u "$daemon_script" \
         --sim-script "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/scripts/simulate_pcap_pipeline_outputs.py" \
         --mode-state "$ML_MODE_STATE_FILE" \
         --default-mbps 10.0 \
         --startup-delay 1.0 \
         --speed-factor 1.0 \
+        --live-only \
+        --eve-json-path "$eve_json_path" \
+        --eve-poll-interval 0.5 \
         >> "$log_path" 2>&1 &
     TCPREPLAY_DAEMON_PID=$!
     disown "$TCPREPLAY_DAEMON_PID" 2>/dev/null || true
