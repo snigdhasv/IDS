@@ -44,7 +44,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
@@ -347,6 +347,108 @@ def _random_port(rng: random.Random, high: bool = True) -> int:
     if high:
         return rng.randint(1024, 65535)
     return rng.choice(COMMON_SERVICE_PORTS)
+
+
+def load_flows_from_eve(eve_path: Optional[str]) -> Tuple[List[FlowRecord], Dict[str, float]]:
+    """Load real flow records from Suricata eve.json file."""
+    flows: List[FlowRecord] = []
+    total_packets = 0
+    total_bytes = 0
+    min_ts = float('inf')
+    max_ts = 0.0
+
+    if not eve_path or not Path(eve_path).exists():
+        return flows, {}
+
+    try:
+        with open(eve_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+
+                # Only process flow events
+                if obj.get("event_type") != "flow":
+                    continue
+
+                src_ip = obj.get("src_ip", "")
+                dst_ip = obj.get("dest_ip", "")
+                src_port = obj.get("src_port", 0)
+                dst_port = obj.get("dest_port", 0)
+                proto = (obj.get("proto") or "TCP").upper()
+
+                flow_obj = obj.get("flow", {}) or {}
+                pkts_toserver = int(flow_obj.get("pkts_toserver", 0))
+                pkts_toclient = int(flow_obj.get("pkts_toclient", 0))
+                bytes_toserver = int(flow_obj.get("bytes_toserver", 0))
+                bytes_toclient = int(flow_obj.get("bytes_toclient", 0))
+                total_packets_flow = pkts_toserver + pkts_toclient
+                total_bytes_flow = bytes_toserver + bytes_toclient
+
+                # Parse timestamps
+                start_ts = flow_obj.get("start")
+                end_ts = flow_obj.get("end")
+                first_ts = _parse_suricata_ts(start_ts) if start_ts else time.time()
+                last_ts = _parse_suricata_ts(end_ts) if end_ts else first_ts
+
+                min_ts = min(min_ts, first_ts)
+                max_ts = max(max_ts, last_ts)
+                total_packets += total_packets_flow
+                total_bytes += total_bytes_flow
+
+                flows.append(
+                    FlowRecord(
+                        key=_flow_key(src_ip, dst_ip, src_port, dst_port, proto),
+                        src_ip=src_ip,
+                        dst_ip=dst_ip,
+                        src_port=src_port,
+                        dst_port=dst_port,
+                        protocol=proto,
+                        first_ts=first_ts,
+                        last_ts=last_ts,
+                        packets=total_packets_flow,
+                        bytes_total=total_bytes_flow,
+                    )
+                )
+    except Exception as e:
+        print(f"Warning: Error loading eve.json from {eve_path}: {e}", file=sys.stderr)
+
+    if min_ts == float('inf'):
+        min_ts = time.time()
+    if max_ts == 0.0:
+        max_ts = min_ts + 1.0
+
+    stats = {
+        "packets": total_packets,
+        "bytes": total_bytes,
+        "flows": len(flows),
+        "pcap_start": min_ts,
+        "pcap_end": max_ts,
+    }
+    return flows, stats
+
+
+def _parse_suricata_ts(ts_str: str) -> float:
+    """Parse Suricata timestamp like '2025-11-24T12:10:51.781088+0530' to epoch seconds."""
+    if not ts_str:
+        return time.time()
+    patterns = ["%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f"]
+    for pattern in patterns:
+        try:
+            dt = datetime.strptime(ts_str, pattern)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            continue
+    try:
+        return float(ts_str)
+    except Exception:
+        return time.time()
 
 
 def synthesize_flows(
@@ -1308,7 +1410,12 @@ def write_predictions_csv(mode: str, flows: List[FlowRecord]) -> Path:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pcap", required=True, help="Path to CICIDS PCAP to profile")
+    parser.add_argument("--pcap", required=False, help="Path to CICIDS PCAP to profile")
+    parser.add_argument(
+        "--eve-json",
+        dest="eve_json",
+        help="Path to Suricata eve.json file to extract real flow features (takes precedence over PCAP)",
+    )
     parser.add_argument(
         "--mode",
         choices=sorted(MODE_METADATA.keys()),
@@ -1458,14 +1565,65 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     rng = random.Random(args.seed or int(time.time()))
-    pcap_path = Path(args.pcap).expanduser().resolve()
-    if not pcap_path.exists():
-        parser.error(f"PCAP not found: {pcap_path}")
-
+    
+    # Determine source: eve.json takes precedence over PCAP
+    use_eve_json = bool(args.eve_json)
+    if use_eve_json:
+        eve_path = Path(args.eve_json).expanduser().resolve()
+        if not eve_path.exists():
+            parser.error(f"eve.json not found: {eve_path}")
+        print(f"📁 eve.json: {eve_path}")
+        flows, stats = load_flows_from_eve(str(eve_path))
+        if not flows:
+            print("⚠️  No flow events found in eve.json, falling back to generation mode")
+            use_eve_json = False
+        else:
+            print(f"   loaded {len(flows):,} real flows from eve.json")
+            # Infer profile from eve.json filename if available
+            profile, keyword_hints = infer_profile_from_pcap(eve_path)
+    
+    if not use_eve_json:
+        # Fallback: use PCAP or synthetic generation
+        if not args.pcap:
+            parser.error("Either --pcap or --eve-json must be provided")
+        pcap_path = Path(args.pcap).expanduser().resolve()
+        if not pcap_path.exists():
+            parser.error(f"PCAP not found: {pcap_path}")
+        print(f"📁 PCAP: {pcap_path}")
+        profile, keyword_hints = infer_profile_from_pcap(pcap_path)
+        
+        cache_path = Path(args.flow_cache).expanduser().resolve() if args.flow_cache else None
+        stats: Dict[str, float]
+        
+        if cache_path and cache_path.exists():
+            flows, stats = _load_flow_cache(cache_path)
+            print(f"   loaded {len(flows):,} cached flows from {cache_path}")
+        else:
+            flow_budget = _estimate_flow_budget(pcap_path, args.max_flows)
+            duration_hint = args.timeline_seconds or DEFAULT_TIMELINE_SECONDS
+            flows, stats = synthesize_flows(
+                profile=profile,
+                flow_count=flow_budget,
+                rng=rng,
+                duration=duration_hint,
+                base_ts=time.time(),
+            )
+            print(
+                f"   synthesized {len(flows):,} flows (target={flow_budget:,}, duration≈{duration_hint:.1f}s)"
+            )
+            if cache_path and args.write_flow_cache:
+                _write_flow_cache(cache_path, flows, stats)
+                print(f"   wrote synthetic flow cache → {cache_path}")
+    
     gt_map = load_ground_truth(Path(args.ground_truth_csv).expanduser()) if args.ground_truth_csv else {}
-    profile, keyword_hints = infer_profile_from_pcap(pcap_path)
+    
+    stats = _normalize_stats(stats, flows, duration_hint=args.timeline_seconds or DEFAULT_TIMELINE_SECONDS)
+    print(f"   packets={stats['packets']:,} bytes={stats['bytes']:,} flows={stats['flows']:,}")
+    if args.realtime:
+        print(
+            f"   realtime streaming: enabled (speed ×{args.speed_factor:.2f}, delay {args.startup_delay:.2f}s)"
+        )
 
-    print(f"📁 PCAP: {pcap_path}")
     tcpreplay_gate: Optional[TcpreplayGate] = None
     timeout_value = None if args.tcpreplay_timeout is None or args.tcpreplay_timeout < 0 else args.tcpreplay_timeout
     if args.require_tcpreplay:
@@ -1480,37 +1638,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             grace_seconds=args.tcpreplay_grace_seconds,
         )
         print("   detected tcpreplay ✅")
-
-    cache_path = Path(args.flow_cache).expanduser().resolve() if args.flow_cache else None
-    flows: List[FlowRecord]
-    stats: Dict[str, float]
-    duration_hint = args.timeline_seconds or DEFAULT_TIMELINE_SECONDS
-
-    if cache_path and cache_path.exists():
-        flows, stats = _load_flow_cache(cache_path)
-        print(f"   loaded {len(flows):,} cached flows from {cache_path}")
-    else:
-        flow_budget = _estimate_flow_budget(pcap_path, args.max_flows)
-        flows, stats = synthesize_flows(
-            profile=profile,
-            flow_count=flow_budget,
-            rng=rng,
-            duration=duration_hint,
-            base_ts=time.time(),
-        )
-        print(
-            f"   synthesized {len(flows):,} flows (target={flow_budget:,}, duration≈{duration_hint:.1f}s)"
-        )
-        if cache_path and args.write_flow_cache:
-            _write_flow_cache(cache_path, flows, stats)
-            print(f"   wrote synthetic flow cache → {cache_path}")
-
-    stats = _normalize_stats(stats, flows, duration_hint=duration_hint)
-    print(f"   packets={stats['packets']:,} bytes={stats['bytes']:,} flows={stats['flows']:,}")
-    if args.realtime:
-        print(
-            f"   realtime streaming: enabled (speed ×{args.speed_factor:.2f}, delay {args.startup_delay:.2f}s)"
-        )
 
     use_ground_truth = bool(gt_map)
     assign_ground_truth(

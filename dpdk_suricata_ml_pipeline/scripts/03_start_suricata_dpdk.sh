@@ -163,6 +163,9 @@ outputs:
         - tls
         - stats
         - packet
+        - http
+      payload: yes
+      payload-printable: yes
 
 default-rule-path: /etc/suricata/rules
 rule-files:
