@@ -28,6 +28,8 @@ Highlights
   default (configurable via --accuracy).
 """
 
+## python /home/ifscr/SE_02_2025/IDS/dpdk_suricata_ml_pipeline/scripts/simulate_pcap_pipeline_outputs.py   --pcap /home/ifscr/SE_02_2025/IDS/dpdk_suricata_ml_pipeline/CICIDS2017_real_pcaps/Wednesday-fixed.pcap   --mode ensemble5   --accuracy 0.93   --realtime   --speed-factor 2.0
+
 from __future__ import annotations
 
 import argparse
