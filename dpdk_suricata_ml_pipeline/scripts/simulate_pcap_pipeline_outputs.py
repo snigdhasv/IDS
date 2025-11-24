@@ -1206,13 +1206,17 @@ def stream_artifacts(
     burst_gap_us: float = 120.0,
     burst_gap_jitter_us: float = 80.0,
     tcpreplay_gate: Optional["TcpreplayGate"] = None,
-) -> Tuple[List[Path], List[Path]]:
+) -> Tuple[List[Path], List[Path], Path]:
     sorted_flows = sorted(flows, key=lambda r: r.sim_offset)
     date_tag = datetime.now().strftime("%Y%m%d")
     jsonl_paths = [metrics_dir / f"metrics_{date_tag}.jsonl" for metrics_dir in METRICS_DIRS]
     throughput_paths = [metrics_dir / f"throughput_{date_tag}.csv" for metrics_dir in METRICS_DIRS]
+    
+    # Create/get predictions CSV path upfront (realtime append mode)
+    csv_path = write_predictions_csv(mode, flows)
+    
     if not sorted_flows:
-        return jsonl_paths, throughput_paths
+        return jsonl_paths, throughput_paths, csv_path
 
     effective_speed = speed_factor if speed_factor > 0 else 1.0
     banner = MODE_METADATA[mode]["startup_banner"]
@@ -1235,6 +1239,31 @@ def stream_artifacts(
             log_files.append(stack.enter_context(path.open("a")))
             opened_paths.add(resolved)
         metrics_files = [stack.enter_context(path.open("a")) for path in jsonl_paths]
+        
+        # Open CSV file in append mode for realtime writing
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        csv_file = stack.enter_context(csv_path.open("a", newline=""))
+        csv_writer = csv.DictWriter(
+            csv_file,
+            fieldnames=[
+                "timestamp",
+                "flow_id",
+                "src_ip",
+                "dst_ip",
+                "src_port",
+                "dst_port",
+                "protocol",
+                "ground_truth",
+                "prediction",
+                "confidence",
+                "models_voted",
+                "agreement_percent",
+                "latency_ms",
+                "packets",
+                "bytes",
+                "correct",
+            ],
+        )
         bucket_start_ts = start_wall
         bucket_events = 0
         bucket_bytes = 0
@@ -1375,6 +1404,10 @@ def stream_artifacts(
                 for mf in metrics_files:
                     mf.write(json.dumps(ml_entry) + "\n")
                     mf.flush()
+                
+                # Write flow to CSV in realtime
+                csv_writer.writerow(flow.as_prediction_row())
+                csv_file.flush()
 
                 should_flush = (bucket_last_ts - bucket_start_ts) >= bucket_target_seconds
                 if should_flush:
@@ -1394,7 +1427,7 @@ def stream_artifacts(
 
     emitted_flows = [flow for flow in sorted_flows if flow.sim_timestamp > 0]
     if not emitted_flows:
-        return jsonl_paths, throughput_paths
+        return jsonl_paths, throughput_paths, csv_path
 
     total_bytes = sum(flow.bytes_total for flow in emitted_flows)
     duration = max(emitted_flows[-1].sim_timestamp - emitted_flows[0].sim_timestamp, 1.0)
@@ -1427,37 +1460,39 @@ def stream_artifacts(
                 ]
             )
 
-    return jsonl_paths, throughput_paths
+    return jsonl_paths, throughput_paths, csv_path
 
 
 def write_predictions_csv(mode: str, flows: List[FlowRecord]) -> Path:
+    """Create or get existing predictions CSV path (for realtime append mode)."""
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = PIPELINE_LOG_DIR / PREDICTION_CSV_TEMPLATE.format(mode=mode, stamp=stamp)
-    with csv_path.open("w", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=[
-                "timestamp",
-                "flow_id",
-                "src_ip",
-                "dst_ip",
-                "src_port",
-                "dst_port",
-                "protocol",
-                "ground_truth",
-                "prediction",
-                "confidence",
-                "models_voted",
-                "agreement_percent",
-                "latency_ms",
-                "packets",
-                "bytes",
-                "correct",
-            ],
-        )
-        writer.writeheader()
-        for flow in flows:
-            writer.writerow(flow.as_prediction_row())
+    
+    # Create file with header if it doesn't exist
+    if not csv_path.exists():
+        with csv_path.open("w", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "timestamp",
+                    "flow_id",
+                    "src_ip",
+                    "dst_ip",
+                    "src_port",
+                    "dst_port",
+                    "protocol",
+                    "ground_truth",
+                    "prediction",
+                    "confidence",
+                    "models_voted",
+                    "agreement_percent",
+                    "latency_ms",
+                    "packets",
+                    "bytes",
+                    "correct",
+                ],
+            )
+            writer.writeheader()
     return csv_path
 
 
@@ -1845,7 +1880,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     else:
         gt_source = None
 
-    jsonl_paths, throughput_paths = stream_artifacts(
+    jsonl_paths, throughput_paths, csv_path = stream_artifacts(
         args.mode,
         flows,
         stats,
@@ -1862,7 +1897,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         burst_gap_jitter_us=args.burst_gap_jitter_us,
         tcpreplay_gate=tcpreplay_gate,
     )
-    csv_path = write_predictions_csv(args.mode, flows)
     perf_paths = write_performance_metrics(args.mode, flows, stats)
 
     print("✓ Simulation complete")
