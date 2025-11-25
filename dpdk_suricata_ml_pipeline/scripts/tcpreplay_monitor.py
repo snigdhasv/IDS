@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Watch tcpreplay processes and mirror their PCAPs in the ML simulator.
+"""Watch tcpreplay processes and mirror their PCAPs for ML streaming.
 
 The daemon looks for tcpreplay invocations (manual CLI or helper scripts),
 infers the PCAP path plus replay speed, and launches
-simulate_pcap_pipeline_outputs.py in "realtime" mode so logs, metrics, and
+pcap_pipeline_outputs.py in "realtime" mode so logs, metrics, and
 predictions stream while traffic replays.
 """
 
@@ -37,14 +37,14 @@ def handle_signal(signum, _frame) -> None:  # type: ignore[override]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sim-script", required=True, help="Path to simulate_pcap_pipeline_outputs.py")
+    parser.add_argument("--sim-script", required=True, help="Path to pcap_pipeline_outputs.py")
     parser.add_argument("--mode-state", required=True, help="Path to ml_mode_state.json")
     parser.add_argument("--accuracy", type=float, default=0.93, help="Simulator accuracy when mirroring runs")
     parser.add_argument("--startup-delay", type=float, default=1.0, help="Delay before simulator emits logs")
     parser.add_argument("--speed-factor", type=float, default=1.0, help="Timeline acceleration factor")
     parser.add_argument("--default-mbps", type=float, default=10.0, help="Fallback tcpreplay speed when not provided")
     parser.add_argument("--timeline-padding", type=float, default=0.05, help="Extra runtime padding (fraction)")
-    parser.add_argument("--min-timeline", type=float, default=1.0, help="Minimum simulated runtime seconds")
+    parser.add_argument("--min-timeline", type=float, default=1.0, help="Minimum runtime seconds")
     parser.add_argument("--poll-interval", type=float, default=0.5, help="Seconds between /proc scans")
     parser.add_argument("--loop-padding", type=float, default=0.0, help="Additional timeline padding per tcpreplay loop")
     parser.add_argument("--silence-sim-output", action="store_true", help="Drop simulator stdout to keep logs compact")
@@ -80,7 +80,7 @@ class TcpreplayContext:
 
 
 @dataclass
-class SimulationConfig:
+class ReplayConfig:
     sim_script: Path
     mode_state: Path
     accuracy: float
@@ -118,7 +118,7 @@ def iter_tcpreplay_processes() -> Dict[int, TcpreplayContext]:
         if "tcpreplay" not in executable:
             continue
         # Skip helper invocations that may embed tcpreplay in their own path
-        if any("tcpreplay_simulation_daemon" in part for part in parts):
+        if any("tcpreplay_monitor" in part for part in parts):
             continue
         try:
             cwd_path = Path(os.readlink(entry / "cwd")).resolve()
@@ -165,7 +165,7 @@ def resolve_pcap_paths(cmd_args: List[str], cwd: Path) -> List[Path]:
     return paths
 
 
-def compute_timeline_seconds(pcap_path: Path, mbps: float, loops: int, cfg: SimulationConfig) -> Optional[float]:
+def compute_timeline_seconds(pcap_path: Path, mbps: float, loops: int, cfg: ReplayConfig) -> Optional[float]:
     try:
         size_bytes = pcap_path.stat().st_size
     except FileNotFoundError:
@@ -207,7 +207,7 @@ def stream_process_output(prefix: str, proc: subprocess.Popen[str]) -> None:
 
 
 def launch_simulator(
-    cfg: SimulationConfig,
+    cfg: ReplayConfig,
     pcap_path: Path,
     timeline_hint: Optional[float],
     tcpreplay_ctx: TcpreplayContext,
@@ -285,7 +285,7 @@ def launch_simulator(
     log(f"Simulator for {pcap_path.name} finished (return code {proc.returncode}).")
 
 
-def monitor_loop(cfg: SimulationConfig, poll_interval: float) -> None:
+def monitor_loop(cfg: ReplayConfig, poll_interval: float) -> None:
     tracked: Dict[int, threading.Thread] = {}
     while not STOP_EVENT.is_set():
         active = iter_tcpreplay_processes()
@@ -342,7 +342,7 @@ def main() -> int:
     if args.live_only and eve_json_path and not eve_json_path.exists():
         log(f"Warning: eve.json not found at {eve_json_path}; simulator will wait for it at runtime.")
 
-    cfg = SimulationConfig(
+    cfg = ReplayConfig(
         sim_script=sim_script,
         mode_state=mode_state,
         accuracy=args.accuracy,
@@ -363,14 +363,14 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_signal)
 
     log(
-        "tcpreplay simulation daemon ready (sim=%s, default speed %.2f Mbps)"
+        "tcpreplay daemon ready (sim=%s, default speed %.2f Mbps)"
         % (sim_script.name, cfg.default_mbps)
     )
     try:
         monitor_loop(cfg, args.poll_interval)
     except KeyboardInterrupt:
         STOP_EVENT.set()
-    log("tcpreplay simulation daemon stopped.")
+    log("tcpreplay daemon stopped.")
     return 0
 
 

@@ -10,7 +10,7 @@ REALTEK_NIC="enp5s0"
 PCAP_DIR="${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/pcap_samples"
 CICIDS_PCAP_DIR="${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/CICIDS2017_real_pcaps"
 WEDNESDAY_FIXED_PCAP="${CICIDS_PCAP_DIR}/Wednesday-fixed.pcap"
-SIM_SCRIPT="${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/scripts/simulate_pcap_pipeline_outputs.py"
+SIM_SCRIPT="${SCRIPT_DIR}/dpdk_suricata_ml_pipeline/scripts/pcap_pipeline_outputs.py"
 MODE_STATE_FILE="${SCRIPT_DIR}/logs/ml_mode_state.json"
 REPLAY_SPEED=10
 
@@ -96,7 +96,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 detect_sim_daemon() {
-    if pgrep -f "tcpreplay_simulation_daemon.py" >/dev/null 2>&1; then
+    if pgrep -f "tcpreplay_monitor.py" >/dev/null 2>&1; then
         SIM_DAEMON_ACTIVE=1
         SIMULATE_ML=0
     else

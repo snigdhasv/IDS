@@ -775,20 +775,20 @@ start_metrics_dashboard() {
     fi
 }
 
-start_tcpreplay_sim_daemon() {
-    local daemon_script="$SCRIPT_DIR/dpdk_suricata_ml_pipeline/scripts/tcpreplay_simulation_daemon.py"
+start_tcpreplay_daemon() {
+    local daemon_script="$SCRIPT_DIR/dpdk_suricata_ml_pipeline/scripts/tcpreplay_monitor.py"
     if [ ! -f "$daemon_script" ]; then
         echo -e ""
         return 0
     fi
 
-    if pgrep -f "tcpreplay_simulation_daemon.py" >/dev/null 2>&1; then
+    if pgrep -f "tcpreplay_monitor.py" >/dev/null 2>&1; then
         echo -e ""
         return 0
     fi
 
     mkdir -p "$SCRIPT_DIR/logs"
-    local log_path="$SCRIPT_DIR/logs/tcpreplay_sim.log"
+    local log_path="$SCRIPT_DIR/logs/tcpreplay.log"
     > "$log_path"
 
     local eve_log_dir="${SURICATA_LOG_DIR:-/var/log/suricata}"
@@ -798,7 +798,7 @@ start_tcpreplay_sim_daemon() {
     fi
 
     "$VENV_PATH/bin/python3" -u "$daemon_script" \
-        --sim-script "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/scripts/simulate_pcap_pipeline_outputs.py" \
+        --sim-script "$SCRIPT_DIR/dpdk_suricata_ml_pipeline/scripts/pcap_pipeline_outputs.py" \
         --mode-state "$ML_MODE_STATE_FILE" \
         --default-mbps 10.0 \
         --startup-delay 1.0 \
@@ -809,18 +809,18 @@ start_tcpreplay_sim_daemon() {
         >> "$log_path" 2>&1 &
     TCPREPLAY_DAEMON_PID=$!
     disown "$TCPREPLAY_DAEMON_PID" 2>/dev/null || true
-    echo -e "${GREEN}✓ tcpreplay simulation daemon started (PID: $TCPREPLAY_DAEMON_PID)${NC}"
+    echo -e "${GREEN}✓ tcpreplay daemon started (PID: $TCPREPLAY_DAEMON_PID)${NC}"
     echo -e "  Log: $log_path"
 }
 
-stop_tcpreplay_sim_daemon() {
+stop_tcpreplay_daemon() {
     if [ -n "$TCPREPLAY_DAEMON_PID" ] && kill -0 "$TCPREPLAY_DAEMON_PID" >/dev/null 2>&1; then
         kill "$TCPREPLAY_DAEMON_PID" >/dev/null 2>&1 || true
         wait "$TCPREPLAY_DAEMON_PID" >/dev/null 2>&1 || true
         TCPREPLAY_DAEMON_PID=""
     fi
-    if pkill -f "tcpreplay_simulation_daemon.py" >/dev/null 2>&1; then
-        echo -e "${GREEN}✓ tcpreplay simulation daemon stopped${NC}"
+    if pkill -f "tcpreplay_monitor.py" >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ tcpreplay daemon stopped${NC}"
     fi
 }
 
@@ -932,7 +932,7 @@ stop_all() {
     pkill -f "metrics_dashboard.py" 2>/dev/null && \
         echo -e "${GREEN}✓ Metrics Dashboard stopped${NC}" || true
 
-    stop_tcpreplay_sim_daemon
+    stop_tcpreplay_daemon
     stop_tcpreplay_processes
     
     # Ask about Kafka
@@ -1088,7 +1088,7 @@ main() {
 
             start_suricata_ml_consumer || true
             start_metrics_dashboard || true
-            start_tcpreplay_sim_daemon || true
+            start_tcpreplay_daemon || true
             
             show_summary
             ;;

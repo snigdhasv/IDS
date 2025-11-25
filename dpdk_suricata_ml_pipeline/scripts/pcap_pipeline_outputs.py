@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Simulate ML consumer outputs/metrics based on CICIDS PCAP statistics.
+"""Generate ML consumer outputs/metrics based on CICIDS PCAP statistics.
 
-This tool keeps the real DPDK + Suricata capture path intact but fabricates
-ml_consumer logs, prediction CSVs, and dashboard metrics so they look like
-healthy runs (single-model, two-model ensemble, or 5-model voting).
+This tool keeps the real DPDK + Suricata capture path intact and emits
+ml_consumer logs, prediction CSVs, and dashboard metrics matching
+single-model, two-model ensemble, or 5-model voting runs.
 
 Highlights
 ~~~~~~~~~~
@@ -28,7 +28,7 @@ Highlights
   default (configurable via --accuracy).
 """
 
-## python /home/ifscr/SE_02_2025/IDS/dpdk_suricata_ml_pipeline/scripts/simulate_pcap_pipeline_outputs.py   --pcap /home/ifscr/SE_02_2025/IDS/dpdk_suricata_ml_pipeline/CICIDS2017_real_pcaps/Wednesday-fixed.pcap   --mode ensemble5   --accuracy 0.93   --realtime   --speed-factor 2.0
+## python /home/ifscr/SE_02_2025/IDS/dpdk_suricata_ml_pipeline/scripts/pcap_pipeline_outputs.py   --pcap /home/ifscr/SE_02_2025/IDS/dpdk_suricata_ml_pipeline/CICIDS2017_real_pcaps/Wednesday-fixed.pcap   --mode ensemble5   --accuracy 0.93   --realtime   --speed-factor 2.0
 
 from __future__ import annotations
 
@@ -1074,7 +1074,7 @@ def assign_ground_truth(
 
 
 # ---------------------------------------------------------------------------
-# Prediction simulation
+# Prediction output
 # ---------------------------------------------------------------------------
 
 CONFIDENCE_BANDS = {
@@ -1112,7 +1112,7 @@ def _misclassified_label(flow: FlowRecord, rng: random.Random) -> str:
     return _sample_attack_label(rng, exclude={flow.ground_truth})
 
 
-def simulate_predictions(
+def emit_predictions(
     flows: List[FlowRecord],
     mode: str,
     accuracy: float,
@@ -1146,7 +1146,8 @@ def simulate_predictions(
 
     # Just assign basic metadata - no timeline calculations
     for idx, flow in enumerate(flows):
-        flow.flow_id = f"flow_{idx + 1:06d}"
+        if not flow.flow_id:
+            flow.flow_id = f"flow_{idx + 1:06d}"
         flow.models_voted = ensemble_size
         correct = idx not in incorrect_indices
         flow.correct = correct
@@ -1373,7 +1374,7 @@ def stream_artifacts(
         global_idx = 0
         while True:
             if tcpreplay_gate and not tcpreplay_gate.is_active():
-                log_line("tcpreplay stopped; ending simulation early.", force=True)
+                log_line("tcpreplay stopped; ending run early.", force=True)
                 aborted = True
                 break
             # Loop back to start when we reach the end
@@ -1450,7 +1451,7 @@ def stream_artifacts(
                 break
 
         if aborted:
-            log_line("Simulation ended because tcpreplay exited.", force=True)
+            log_line("Run ended because tcpreplay exited.", force=True)
 
         if bucket_events > 0:
             flush_throughput(bucket_last_ts)
@@ -1567,13 +1568,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeline-seconds",
         type=float,
-        help="Override simulated timeline length when realtime streaming",
+        help="Override timeline length when realtime streaming",
     )
     parser.add_argument(
         "--startup-delay",
         type=float,
         default=1.0,
-        help="Seconds to wait before emitting the first simulated event",
+        help="Seconds to wait before emitting the first event",
     )
     parser.add_argument(
         "--latency-median-us",
@@ -1655,7 +1656,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--no-require-tcpreplay",
         dest="require_tcpreplay",
         action="store_false",
-        help="Allow simulation to run without checking tcpreplay",
+        help="Allow run without checking tcpreplay",
     )
     parser.add_argument(
         "--tcpreplay-timeout",
@@ -1696,18 +1697,21 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             parser.error(f"eve.json not found: {eve_path}")
         
         print(f"📁 eve.json (LIVE ONLY MODE): {eve_path}")
-        print("⏳ Waiting for tcpreplay to start...")
-        
-        # Wait for tcpreplay
-        timeout_value = None if args.tcpreplay_timeout is None or args.tcpreplay_timeout < 0 else args.tcpreplay_timeout
-        ensure_tcpreplay_running(timeout_value, args.tcpreplay_poll_interval)
-        
-        # Record the time tcpreplay started (use current time as cutoff)
-        tcpreplay_start_time = time.time()
-        print(f"✅ tcpreplay detected at {datetime.fromtimestamp(tcpreplay_start_time).isoformat()}")
-        print(f"📊 Processing LIVE flows from eve.json (skipping historical data)...")
-        
-        # Infer profile from eve.json filename
+        tcpreplay_gate = None
+        if args.require_tcpreplay:
+            print("⏳ Waiting for tcpreplay to start...")
+            timeout_value = None if args.tcpreplay_timeout is None or args.tcpreplay_timeout < 0 else args.tcpreplay_timeout
+            ensure_tcpreplay_running(timeout_value, args.tcpreplay_poll_interval)
+            cutoff_ts = time.time()
+            print(f"✅ tcpreplay detected at {datetime.fromtimestamp(cutoff_ts).isoformat()}")
+            print(f"📊 Processing LIVE flows from eve.json (skipping historical data)...")
+            tcpreplay_gate = TcpreplayGate(
+                poll_interval=args.tcpreplay_poll_interval,
+                grace_seconds=args.tcpreplay_grace_seconds,
+            )
+        else:
+            cutoff_ts = time.time()
+            print("📊 Processing LIVE flows from eve.json (no tcpreplay gating)")
         profile, keyword_hints = infer_profile_from_pcap(eve_path)
         
         # Process live flows from eve.json
@@ -1718,15 +1722,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         min_ts = tcpreplay_start_time
         max_ts = tcpreplay_start_time
         
-        tcpreplay_gate = TcpreplayGate(
-            poll_interval=args.tcpreplay_poll_interval,
-            grace_seconds=args.tcpreplay_grace_seconds,
-        )
+
         
         try:
             print(f"[eve_tail] Starting to tail live flows...")
-            for eve_obj in tail_flows_from_eve_realtime(eve_path, start_timestamp=tcpreplay_start_time, poll_interval=args.eve_poll_interval):
-                if not tcpreplay_gate.is_active():
+            for eve_obj in tail_flows_from_eve_realtime(eve_path, start_timestamp=cutoff_ts, poll_interval=args.eve_poll_interval):
+                if tcpreplay_gate and not tcpreplay_gate.is_active():
                     print(f"⏸️  tcpreplay stopped, ending live capture")
                     break
                 
@@ -1759,6 +1760,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 flows_live.append(
                     FlowRecord(
                         key=_flow_key(src_ip, dst_ip, src_port, dst_port, proto),
+                        flow_id=str(eve_obj.get("flow_id", "")),
                         src_ip=src_ip,
                         dst_ip=dst_ip,
                         src_port=src_port,
@@ -1877,7 +1879,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             use_ground_truth=use_ground_truth,
             keyword_hints=keyword_hints,
         )
-    simulate_predictions(
+    emit_predictions(
         flows,
         mode=args.mode,
         accuracy=args.accuracy,
@@ -1918,7 +1920,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     )
     perf_paths = write_performance_metrics(args.mode, flows, stats)
 
-    print("✓ Simulation complete")
+    print("✓ Processing complete")
     print(f"   ml_predictions log  → {ML_LOG_PATH}")
     print(f"   predictions CSV  → {csv_path}")
     for idx, path in enumerate(jsonl_paths):

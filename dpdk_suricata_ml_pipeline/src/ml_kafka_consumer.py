@@ -25,6 +25,7 @@ from collections import defaultdict, deque
 
 import numpy as np
 from kafka import KafkaConsumer, KafkaProducer
+import threading
 from kafka.errors import KafkaError
 
 # Import our custom modules
@@ -99,7 +100,7 @@ class MLEnhancedKafkaConsumer:
         
         # Initialize components
         self.feature_extractor = CICIDS2017FeatureExtractor()
-        self.feature_mapper = FeatureMapper(target_features=34)  # Map 65→34 features
+        self.feature_mapper = FeatureMapper(target_features=34)
         self.model_loader = MLModelLoader()
         self.alert_processor = AlertProcessor()
         
@@ -149,6 +150,7 @@ class MLEnhancedKafkaConsumer:
             'kafka_bootstrap_servers': 'localhost:9092',
             'kafka_input_topic': 'suricata-alerts',
             'kafka_output_topic': 'ml-predictions',
+            'kafka_features_topic': 'ml-features',
             'kafka_group_id': 'ml-consumer-group',
             'ml_model_name': 'random_forest_model_2017.joblib',
             'batch_size': 100,
@@ -171,6 +173,8 @@ class MLEnhancedKafkaConsumer:
                                 default_config['kafka_input_topic'] = value
                             elif key == 'KAFKA_TOPIC_ML_PREDICTIONS':
                                 default_config['kafka_output_topic'] = value
+                            elif key == 'KAFKA_TOPIC_ML_FEATURES':
+                                default_config['kafka_features_topic'] = value
                 logger.info(f"Configuration loaded from {config_file}")
             except Exception as e:
                 logger.warning(f"Error loading config file: {e}, using defaults")
@@ -197,6 +201,11 @@ class MLEnhancedKafkaConsumer:
             print(f"{Colors.GREEN}✓ ML model loaded{Colors.END}")
             print(f"  Type: {model_info['model_type']}")
             print(f"  Features: {model_info['expected_features']}")
+            try:
+                expected = int(model_info.get('expected_features') or 34)
+            except Exception:
+                expected = 34
+            self.feature_mapper = FeatureMapper(target_features=expected)
             
             # Initialize Kafka consumer
             print(f"{Colors.YELLOW}Connecting to Kafka...{Colors.END}")
@@ -209,6 +218,14 @@ class MLEnhancedKafkaConsumer:
                 enable_auto_commit=True
                 # Using poll() method, no consumer_timeout_ms needed
             )
+            self.features_consumer = KafkaConsumer(
+                self.config['kafka_features_topic'],
+                bootstrap_servers=self.config['kafka_bootstrap_servers'],
+                group_id=f"{self.config['kafka_group_id']}-features",
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                auto_offset_reset='latest',
+                enable_auto_commit=True
+            )
             
             # Initialize Kafka producer
             self.producer = KafkaProducer(
@@ -219,7 +236,14 @@ class MLEnhancedKafkaConsumer:
             print(f"{Colors.GREEN}✓ Kafka connected{Colors.END}")
             print(f"  Input topic: {self.config['kafka_input_topic']}")
             print(f"  Output topic: {self.config['kafka_output_topic']}")
+            print(f"  Features topic: {self.config['kafka_features_topic']}")
             print()
+            self.features_cache = {}
+            self.features_cache_max = 5000
+            self._features_running = True
+            self._features_lock = threading.Lock()
+            self._features_thread = threading.Thread(target=self._features_loop, daemon=True)
+            self._features_thread.start()
             
             return True
             
@@ -311,6 +335,60 @@ class MLEnhancedKafkaConsumer:
         except Exception as e:
             logger.error(f"Error in process_event: {e}", exc_info=True)
             self.stats['errors'] += 1
+
+    def _canonical_key(self, src_ip: str, dst_ip: str, src_port: int, dst_port: int, proto: int) -> str:
+        return f"{src_ip}:{src_port}-{dst_ip}:{dst_port}-{proto}"
+
+    def _flow_key_from_event(self, flow_event: Dict) -> Optional[str]:
+        try:
+            src_ip = flow_event.get('src_ip') or flow_event.get('source_ip')
+            dst_ip = flow_event.get('dest_ip') or flow_event.get('destination_ip')
+            src_port = int(flow_event.get('src_port') or flow_event.get('sport') or 0)
+            dst_port = int(flow_event.get('dest_port') or flow_event.get('dport') or 0)
+            p = flow_event.get('proto') or flow_event.get('protocol')
+            if isinstance(p, str):
+                ps = p.lower()
+                if ps == 'tcp':
+                    proto = 6
+                elif ps == 'udp':
+                    proto = 17
+                else:
+                    proto = 0
+            else:
+                proto = int(p or 0)
+            if not src_ip or not dst_ip or not src_port or not dst_port:
+                return None
+            return self._canonical_key(src_ip, dst_ip, src_port, dst_port, proto)
+        except Exception:
+            return None
+
+    def _features_loop(self):
+        try:
+            while self._features_running:
+                messages = self.features_consumer.poll(timeout_ms=5000, max_records=200)
+                if not messages:
+                    continue
+                for tp, records in messages.items():
+                    for msg in records:
+                        try:
+                            v = msg.value
+                            src_ip = v.get('src_ip') or v.get('source_ip')
+                            dst_ip = v.get('dst_ip') or v.get('dest_ip') or v.get('destination_ip')
+                            src_port = int(v.get('src_port') or v.get('sport') or 0)
+                            dst_port = int(v.get('dst_port') or v.get('dest_port') or v.get('dport') or 0)
+                            proto = int(v.get('proto') or v.get('protocol') or 0)
+                            key = self._canonical_key(src_ip, dst_ip, src_port, dst_port, proto) if src_ip and dst_ip and src_port and dst_port else None
+                            if not key:
+                                continue
+                            with self._features_lock:
+                                self.features_cache[key] = v.get('features') or {}
+                                if len(self.features_cache) > self.features_cache_max:
+                                    self.features_cache.pop(next(iter(self.features_cache)))
+                        except Exception:
+                            self.stats['errors'] += 1
+                            continue
+        except Exception:
+            pass
     
     def _process_flow_event(self, flow_event: Dict):
         """
@@ -323,17 +401,42 @@ class MLEnhancedKafkaConsumer:
             self.stats['flows_processed'] += 1
             
             # Extract CICIDS2017 features (measure time)
+            key = self._flow_key_from_event(flow_event)
+            pkt_features = None
+            if key:
+                with self._features_lock:
+                    pkt_features = self.features_cache.get(key)
             feature_start = time.time()
-            features = self.feature_extractor.extract_from_flow(flow_event)
+            flow_features = self.feature_extractor.extract_from_flow(flow_event)
             feature_time = time.time() - feature_start
             self.performance_metrics['feature_extraction_times'].append(feature_time)
+            if not flow_features and not pkt_features:
+                logger.debug("Feature extraction failed for flow")
+                return
+            base_keys = {
+                'Destination Port',
+                'Flow Duration',
+                'Total Fwd Packets',
+                'Total Backward Packets',
+                'Total Length of Fwd Packets',
+                'Total Length of Bwd Packets',
+                'Flow Bytes/s',
+                'Flow Packets/s'
+            }
+            merged = dict(flow_features or {})
+            if pkt_features:
+                for k, v in pkt_features.items():
+                    if k in base_keys:
+                        continue
+                    merged[k] = v
+            features = merged
             
             if not features:
                 logger.debug("Feature extraction failed for flow")
                 return
             
-            # Map 65 features to 34 features for model compatibility
-            feature_array = self.feature_mapper.map_to_34(features)
+            # Map features to model's expected size
+            feature_array = self.feature_mapper.map_features(features, source_count=len(features))
             
             # ML prediction with confidence (measure time)
             inference_start = time.time()
@@ -734,6 +837,7 @@ class MLEnhancedKafkaConsumer:
         """Stop the consumer and cleanup."""
         print(f"\n{Colors.YELLOW}Stopping consumer...{Colors.END}")
         self.running = False
+        self._features_running = False
         
         # Print final stats
         self._print_stats()
@@ -744,6 +848,13 @@ class MLEnhancedKafkaConsumer:
         # Close Kafka connections
         if self.consumer:
             self.consumer.close()
+        if hasattr(self, 'features_consumer') and self.features_consumer:
+            self.features_consumer.close()
+        if hasattr(self, '_features_thread') and self._features_thread:
+            try:
+                self._features_thread.join(timeout=5)
+            except Exception:
+                pass
         if self.producer:
             self.producer.flush()
             self.producer.close()
