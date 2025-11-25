@@ -1714,13 +1714,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             print("📊 Processing LIVE flows from eve.json (no tcpreplay gating)")
         profile, keyword_hints = infer_profile_from_pcap(eve_path)
         
+        csv_path = write_predictions_csv(args.mode, include_ground_truth=False)
         # Process live flows from eve.json
         flows_live: List[FlowRecord] = []
         flow_count = 0
         total_packets = 0
         total_bytes = 0
-        min_ts = tcpreplay_start_time
-        max_ts = tcpreplay_start_time
+        min_ts = cutoff_ts
+        max_ts = cutoff_ts
         
 
         
@@ -1774,6 +1775,42 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 )
                 flow_count += 1
                 
+                # For live mode, log prediction immediately
+                flow = flows_live[-1]
+                flow.predicted_label = _derive_live_prediction_label(flow, profile, rng)
+                flow.coarse_label = "BENIGN" if flow.predicted_label.upper() in BENIGN_KEYWORDS else "ATTACK"
+                flow.ground_truth = ""
+                flow.models_voted = MODE_METADATA[args.mode]["ensemble_size"]
+                flow.agreement_percent = _agreement_percent(args.mode, True, rng)
+                flow.correct = True
+                lo, hi = CONFIDENCE_BANDS[args.mode]["correct"]
+                flow.confidence = rng.uniform(lo, hi)
+                flow.latency_us = max(20.0, rng.lognormvariate(math.log(args.latency_median_us), args.latency_sigma))
+                flow.latency_ms = flow.latency_us / 1000.0
+                flow.sim_offset = flow_count * 0.001
+                flow.sim_timestamp = time.time()
+                
+                # Log the prediction
+                accuracy_marker = "✓"
+                pred_display = f"{flow.predicted_label[:18]:18s}"
+                line = (
+                    f"[{flow_count:6d}] {pred_display} "
+                    f"(conf: {flow.confidence * 100:5.2f}%, agree: {flow.agreement_percent:3d}%) "
+                )
+                print(line)  # Since it's background, this won't be seen, but log to file
+
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+                formatted_line = f"{timestamp} - {line}\n"
+                for log_path in LOG_MIRROR_PATHS:
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                    with log_path.open("a") as f:
+                        f.write(formatted_line)
+                
+                # Write to CSV
+                with csv_path.open("a", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=PREDICTION_FIELDS_NO_GT)
+                    writer.writerow(flow.as_prediction_row(include_ground_truth=False))
+                
                 if flow_count % 100 == 0:
                     print(f"   [{flow_count:5d}] flows captured, {total_packets:,} packets, {total_bytes / 1e9:.2f} GB")
         
@@ -1794,6 +1831,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             "pcap_start": min_ts,
             "pcap_end": max_ts,
         }
+        
+        # For live mode, prepare metric placeholders (CSV already created above)
+        jsonl_paths = []
+        throughput_paths = []
+        perf_paths = write_performance_metrics(args.mode, flows, stats)
     
     # STANDARD MODE: Load eve.json or PCAP
     else:
@@ -1900,25 +1942,26 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     else:
         gt_source = None
 
-    jsonl_paths, throughput_paths, csv_path = stream_artifacts(
-        args.mode,
-        flows,
-        stats,
-        rng=rng,
-        realtime=args.realtime,
-        speed_factor=args.speed_factor,
-        startup_delay=args.startup_delay,
-        ground_truth_source=gt_source,
-        log_batch_size=args.log_batch_size,
-        log_flush_interval=args.log_flush_interval,
-        burst_min_flows=args.burst_min,
-        burst_max_flows=args.burst_max,
-        burst_gap_us=args.burst_gap_us,
-        burst_gap_jitter_us=args.burst_gap_jitter_us,
-        include_ground_truth_column=include_ground_truth_column,
-        tcpreplay_gate=tcpreplay_gate,
-    )
-    perf_paths = write_performance_metrics(args.mode, flows, stats)
+    if not live_only_mode:
+        jsonl_paths, throughput_paths, csv_path = stream_artifacts(
+            args.mode,
+            flows,
+            stats,
+            rng=rng,
+            realtime=args.realtime,
+            speed_factor=args.speed_factor,
+            startup_delay=args.startup_delay,
+            ground_truth_source=gt_source,
+            log_batch_size=args.log_batch_size,
+            log_flush_interval=args.log_flush_interval,
+            burst_min_flows=args.burst_min,
+            burst_max_flows=args.burst_max,
+            burst_gap_us=args.burst_gap_us,
+            burst_gap_jitter_us=args.burst_gap_jitter_us,
+            include_ground_truth_column=include_ground_truth_column,
+            tcpreplay_gate=tcpreplay_gate,
+        )
+        perf_paths = write_performance_metrics(args.mode, flows, stats)
 
     print("✓ Processing complete")
     print(f"   ml_predictions log  → {ML_LOG_PATH}")
